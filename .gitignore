@@ -1,0 +1,4 @@
+/target
+.obsidian/
+*.snap
+*.snap.tmp
