@@ -322,7 +322,7 @@ fn eval_rate_like(
         for sid in &series_ids {
             let labels = store.get_series_labels(*sid).unwrap_or_default();
             let samples = store.get_samples(*sid, end_ms - range_ms, end_ms);
-            let value = compute_rate_like(func_name, &samples, range_ms);
+            let value = compute_rate_like(func_name, samples, range_ms);
             if let Some(v) = value {
                 results.push(SeriesResult {
                     labels,
@@ -338,7 +338,7 @@ fn eval_rate_like(
             let mut t = start_ms;
             while t <= end_ms {
                 let samples = store.get_samples(*sid, t - range_ms, t);
-                if let Some(v) = compute_rate_like(func_name, &samples, range_ms) {
+                if let Some(v) = compute_rate_like(func_name, samples, range_ms) {
                     series_samples.push((t, v));
                 }
                 t += step_ms;

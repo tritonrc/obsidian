@@ -108,7 +108,8 @@ fn decode_snappy_json(body: &[u8]) -> Result<LokiPushRequest, anyhow::Error> {
 }
 
 fn ingest_loki_push(state: &SharedState, request: LokiPushRequest) {
-    let prepared: Vec<(Vec<(String, String)>, Vec<LogEntry>)> = request
+    type StreamData = (Vec<(String, String)>, Vec<LogEntry>);
+    let prepared: Vec<StreamData> = request
         .streams
         .into_iter()
         .map(|stream| {

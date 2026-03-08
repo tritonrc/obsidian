@@ -24,7 +24,8 @@ pub async fn metrics_handler(State(state): State<SharedState>, body: Bytes) -> i
         }
     };
 
-    let mut prepared: Vec<(String, Vec<(String, String)>, Vec<Sample>)> = Vec::new();
+    type MetricData = (String, Vec<(String, String)>, Vec<Sample>);
+    let mut prepared: Vec<MetricData> = Vec::new();
 
     for resource_metrics in &request.resource_metrics {
         let mut resource_labels = extract_resource_labels(&resource_metrics.resource);

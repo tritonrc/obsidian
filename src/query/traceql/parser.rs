@@ -168,6 +168,7 @@ fn parse_conditions(input: &str) -> IResult<&str, (Vec<SpanCondition>, Vec<Logic
     let mut conditions = vec![first];
     let mut logical_ops = Vec::new();
 
+    #[allow(clippy::while_let_loop)]
     loop {
         let trimmed = match multispace0::<&str, nom::error::Error<&str>>(input) {
             Ok((rest, _)) => rest,

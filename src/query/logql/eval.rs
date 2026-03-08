@@ -49,7 +49,7 @@ pub fn evaluate_logql(
                 }
                 let labels = store.get_stream_labels(sid).unwrap_or_default();
                 let entry_tuples: Vec<(i64, String)> = entries
-                    .into_iter()
+                    .iter()
                     .map(|e| (e.timestamp_ns, e.line.clone()))
                     .collect();
                 results.push(StreamResult {
@@ -118,7 +118,7 @@ fn evaluate_metric_query(
             let entries = store.get_entries(*sid, window_start, window_end);
 
             let filtered: Vec<_> = entries
-                .into_iter()
+                .iter()
                 .filter(|e| apply_stages(&e.line, &stages))
                 .collect();
 

@@ -197,7 +197,7 @@ fn span_matches_conditions(
     // Evaluate left-to-right with AND binding tighter than OR.
     // Split by OR first: result is true if ANY OR-group is true.
     // Within each OR-group (connected by AND), ALL conditions must match.
-    let mut current_and_result = span_matches_condition(span, &conditions[0], compiled_regexes.get(0).and_then(|r| r.as_ref()), store);
+    let mut current_and_result = span_matches_condition(span, &conditions[0], compiled_regexes.first().and_then(|r| r.as_ref()), store);
 
     for i in 0..logical_ops.len() {
         let next_match = span_matches_condition(span, &conditions[i + 1], compiled_regexes.get(i + 1).and_then(|r| r.as_ref()), store);
