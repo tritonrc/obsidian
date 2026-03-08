@@ -122,11 +122,7 @@ fn eval_structural(
 
                         for lhs_span in &lhs_result.matched_spans {
                             for rhs_span in &rhs_result.matched_spans {
-                                if is_descendant(
-                                    lhs_span.span_id,
-                                    rhs_span.span_id,
-                                    &span_map,
-                                ) {
+                                if is_descendant(lhs_span.span_id, rhs_span.span_id, &span_map) {
                                     matched.push(rhs_span.clone());
                                 }
                             }
@@ -197,10 +193,20 @@ fn span_matches_conditions(
     // Evaluate left-to-right with AND binding tighter than OR.
     // Split by OR first: result is true if ANY OR-group is true.
     // Within each OR-group (connected by AND), ALL conditions must match.
-    let mut current_and_result = span_matches_condition(span, &conditions[0], compiled_regexes.first().and_then(|r| r.as_ref()), store);
+    let mut current_and_result = span_matches_condition(
+        span,
+        &conditions[0],
+        compiled_regexes.first().and_then(|r| r.as_ref()),
+        store,
+    );
 
     for i in 0..logical_ops.len() {
-        let next_match = span_matches_condition(span, &conditions[i + 1], compiled_regexes.get(i + 1).and_then(|r| r.as_ref()), store);
+        let next_match = span_matches_condition(
+            span,
+            &conditions[i + 1],
+            compiled_regexes.get(i + 1).and_then(|r| r.as_ref()),
+            store,
+        );
         match logical_ops[i] {
             LogicalOp::And => {
                 current_and_result = current_and_result && next_match;

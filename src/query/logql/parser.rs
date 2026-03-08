@@ -63,10 +63,10 @@ pub enum MatchOp {
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum PipelineStage {
-    LineContains(String),          // |= "text"
-    LineNotContains(String),       // != "text"
-    LineRegex(String, Regex),      // |~ "regex"
-    LineNotRegex(String, Regex),   // !~ "regex"
+    LineContains(String),        // |= "text"
+    LineNotContains(String),     // != "text"
+    LineRegex(String, Regex),    // |~ "regex"
+    LineNotRegex(String, Regex), // !~ "regex"
 }
 
 /// Metric functions over log streams.
@@ -363,7 +363,9 @@ mod tests {
         let expr = parse_logql(r#"{service="payments"} != "healthcheck""#).unwrap();
         match expr {
             LogQLExpr::Pipeline { stages, .. } => {
-                assert!(matches!(&stages[0], PipelineStage::LineNotContains(s) if s == "healthcheck"));
+                assert!(
+                    matches!(&stages[0], PipelineStage::LineNotContains(s) if s == "healthcheck")
+                );
             }
             _ => panic!("expected Pipeline"),
         }
@@ -385,7 +387,9 @@ mod tests {
         let expr = parse_logql(r#"{service="payments"} !~ "debug|trace""#).unwrap();
         match expr {
             LogQLExpr::Pipeline { stages, .. } => {
-                assert!(matches!(&stages[0], PipelineStage::LineNotRegex(s, _) if s == "debug|trace"));
+                assert!(
+                    matches!(&stages[0], PipelineStage::LineNotRegex(s, _) if s == "debug|trace")
+                );
             }
             _ => panic!("expected Pipeline"),
         }

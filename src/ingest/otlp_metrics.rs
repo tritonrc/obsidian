@@ -68,8 +68,7 @@ pub async fn metrics_handler(State(state): State<SharedState>, body: Bytes) -> i
                     }
                     Some(Data::Histogram(hist)) => {
                         for dp in &hist.data_points {
-                            let base_labels =
-                                build_dp_labels(&resource_labels, &dp.attributes);
+                            let base_labels = build_dp_labels(&resource_labels, &dp.attributes);
                             let ts_ms = dp.time_unix_nano as i64 / 1_000_000;
 
                             // Store each bucket as a separate series with `le` label

@@ -18,9 +18,16 @@ async fn test_otlp_traces_and_traceql_query() {
     let span_id: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
     ingest_traces(
-        &app, "payments", "process_payment", &trace_id, &span_id,
-        1_000_000_000, 2_000_000_000, 2, // Error status
-    ).await;
+        &app,
+        "payments",
+        "process_payment",
+        &trace_id,
+        &span_id,
+        1_000_000_000,
+        2_000_000_000,
+        2, // Error status
+    )
+    .await;
 
     let query = urlencoding::encode(r#"{ status = error }"#);
     let uri = format!("/api/search?q={}", query);
@@ -44,13 +51,23 @@ async fn test_get_trace_by_id() {
     let state = make_state();
     let app = obsidian::server::build_router(state);
 
-    let trace_id: [u8; 16] = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89];
+    let trace_id: [u8; 16] = [
+        0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+        0x89,
+    ];
     let span_id: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
     ingest_traces(
-        &app, "gateway", "GET /api", &trace_id, &span_id,
-        1_000_000_000, 1_500_000_000, 1,
-    ).await;
+        &app,
+        "gateway",
+        "GET /api",
+        &trace_id,
+        &span_id,
+        1_000_000_000,
+        1_500_000_000,
+        1,
+    )
+    .await;
 
     let uri = format!("/api/traces/{}", "abcdef0123456789abcdef0123456789");
     let req = Request::builder()

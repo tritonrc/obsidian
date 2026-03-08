@@ -117,7 +117,11 @@ impl MetricStore {
         // Maintain sorted order for partition_point correctness
         if was_empty {
             // First batch: check if it's already sorted
-            if !series.samples.windows(2).all(|w| w[0].timestamp_ms <= w[1].timestamp_ms) {
+            if !series
+                .samples
+                .windows(2)
+                .all(|w| w[0].timestamp_ms <= w[1].timestamp_ms)
+            {
                 series.samples.sort_by_key(|s| s.timestamp_ms);
             }
         } else if let Some(prev_ts) = prev_last_ts {
@@ -210,7 +214,11 @@ impl MetricStore {
                     let mut result = PostingList::new();
                     // Get the IDs to exclude (those that have the exact matching value)
                     let exclude = match value_spur {
-                        Some(vs) => self.label_index.get(&(name_spur, vs)).cloned().unwrap_or_default(),
+                        Some(vs) => self
+                            .label_index
+                            .get(&(name_spur, vs))
+                            .cloned()
+                            .unwrap_or_default(),
                         None => PostingList::new(),
                     };
                     for id in all_ids {
@@ -280,9 +288,7 @@ impl MetricStore {
                 let lo = series
                     .samples
                     .partition_point(|s| s.timestamp_ms < start_ms);
-                let hi = series
-                    .samples
-                    .partition_point(|s| s.timestamp_ms <= end_ms);
+                let hi = series.samples.partition_point(|s| s.timestamp_ms <= end_ms);
                 &series.samples[lo..hi]
             }
             None => &[],
@@ -443,7 +449,6 @@ impl MetricStore {
             }
         }
     }
-
 }
 
 impl Default for MetricStore {
@@ -545,13 +550,22 @@ mod tests {
         let mut store = MetricStore::new();
         store.ingest_samples(
             "cpu",
-            vec![("host".into(), "server1".into()), ("env".into(), "prod".into())],
-            vec![Sample { timestamp_ms: 1000, value: 1.0 }],
+            vec![
+                ("host".into(), "server1".into()),
+                ("env".into(), "prod".into()),
+            ],
+            vec![Sample {
+                timestamp_ms: 1000,
+                value: 1.0,
+            }],
         );
         store.ingest_samples(
             "cpu",
             vec![("host".into(), "server2".into())], // no "env" label
-            vec![Sample { timestamp_ms: 2000, value: 2.0 }],
+            vec![Sample {
+                timestamp_ms: 2000,
+                value: 2.0,
+            }],
         );
         // {__name__="cpu", env!="prod"} should match server2 (missing env label)
         let ids = store.select_series(&[
@@ -576,13 +590,22 @@ mod tests {
         let mut store = MetricStore::new();
         store.ingest_samples(
             "cpu",
-            vec![("host".into(), "server1".into()), ("env".into(), "staging".into())],
-            vec![Sample { timestamp_ms: 1000, value: 1.0 }],
+            vec![
+                ("host".into(), "server1".into()),
+                ("env".into(), "staging".into()),
+            ],
+            vec![Sample {
+                timestamp_ms: 1000,
+                value: 1.0,
+            }],
         );
         store.ingest_samples(
             "cpu",
             vec![("host".into(), "server2".into())], // no "env" label
-            vec![Sample { timestamp_ms: 2000, value: 2.0 }],
+            vec![Sample {
+                timestamp_ms: 2000,
+                value: 2.0,
+            }],
         );
         // {__name__="cpu", env!~"staging"} should match server2 (missing env label)
         let ids = store.select_series(&[
@@ -609,9 +632,18 @@ mod tests {
             "m",
             vec![],
             vec![
-                Sample { timestamp_ms: 3000, value: 3.0 },
-                Sample { timestamp_ms: 1000, value: 1.0 },
-                Sample { timestamp_ms: 2000, value: 2.0 },
+                Sample {
+                    timestamp_ms: 3000,
+                    value: 3.0,
+                },
+                Sample {
+                    timestamp_ms: 1000,
+                    value: 1.0,
+                },
+                Sample {
+                    timestamp_ms: 2000,
+                    value: 2.0,
+                },
             ],
         );
         let ids = store.select_series(&[LabelMatcher {
@@ -682,7 +714,10 @@ mod tests {
         store.ingest_samples(
             "cpu",
             vec![("host".into(), "a".into())],
-            vec![Sample { timestamp_ms: 1000, value: 0.5 }],
+            vec![Sample {
+                timestamp_ms: 1000,
+                value: 0.5,
+            }],
         );
         assert!(!store.label_names().is_empty());
         store.evict_before(2000);

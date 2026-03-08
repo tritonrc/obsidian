@@ -78,7 +78,10 @@ async fn test_loki_push_and_logql_query_with_filter() {
     app.clone().oneshot(req).await.unwrap();
 
     let query = urlencoding::encode(r#"{service="payments"} |= "timeout""#);
-    let uri = format!("/loki/api/v1/query?query={}&time=1700000000200000000", query);
+    let uri = format!(
+        "/loki/api/v1/query?query={}&time=1700000000200000000",
+        query
+    );
     let req = Request::builder()
         .method("GET")
         .uri(&uri)
@@ -127,7 +130,12 @@ async fn test_logql_labels_endpoint() {
     let json: Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(json["status"], "success");
-    let label_strs: Vec<&str> = json["data"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+    let label_strs: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
     assert!(label_strs.contains(&"service"));
     assert!(label_strs.contains(&"level"));
 

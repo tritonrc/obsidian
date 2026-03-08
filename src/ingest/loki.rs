@@ -129,10 +129,7 @@ fn ingest_loki_push(state: &SharedState, request: LokiPushRequest) {
                 .into_iter()
                 .filter_map(|(ts_str, line)| {
                     let timestamp_ns: i64 = ts_str.parse().ok()?;
-                    Some(LogEntry {
-                        timestamp_ns,
-                        line,
-                    })
+                    Some(LogEntry { timestamp_ns, line })
                 })
                 .collect();
             (labels, entries)

@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use rustc_hash::FxHashMap;
 use promql_parser::label::{MatchOp as PromMatchOp, Matchers};
 use promql_parser::parser::{
     self, AggregateExpr, BinaryExpr, Call, Expr, LabelModifier, MatrixSelector, NumberLiteral,
     ParenExpr, UnaryExpr, VectorSelector,
 };
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 use crate::store::log_store::{LabelMatchOp, LabelMatcher};
@@ -477,10 +477,7 @@ fn aggregate_group(op: &str, series: &[SeriesResult]) -> Vec<(i64, f64)> {
     timestamps
         .iter()
         .filter_map(|&t| {
-            let values: Vec<f64> = lookups
-                .iter()
-                .filter_map(|m| m.get(&t).copied())
-                .collect();
+            let values: Vec<f64> = lookups.iter().filter_map(|m| m.get(&t).copied()).collect();
             if values.is_empty() {
                 return None;
             }

@@ -148,7 +148,13 @@ pub async fn push_logs(app: &axum::Router, service: &str, msg: &str, ts: &str) {
     app.clone().oneshot(req).await.unwrap();
 }
 
-pub async fn ingest_metrics(app: &axum::Router, service: &str, metric_name: &str, value: f64, ts_ns: u64) {
+pub async fn ingest_metrics(
+    app: &axum::Router,
+    service: &str,
+    metric_name: &str,
+    value: f64,
+    ts_ns: u64,
+) {
     let req = make_gauge_request(service, metric_name, value, ts_ns);
     let r = Request::builder()
         .method("POST")
@@ -169,7 +175,15 @@ pub async fn ingest_traces(
     end_ns: u64,
     status_code: i32,
 ) {
-    let req = make_trace_request(service, span_name, trace_id, span_id, start_ns, end_ns, status_code);
+    let req = make_trace_request(
+        service,
+        span_name,
+        trace_id,
+        span_id,
+        start_ns,
+        end_ns,
+        status_code,
+    );
     let r = Request::builder()
         .method("POST")
         .uri("/v1/traces")

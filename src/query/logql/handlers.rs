@@ -225,22 +225,34 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp_ns_nanoseconds() {
-        assert_eq!(parse_timestamp_ns("1700000000000000000"), Some(1700000000000000000));
+        assert_eq!(
+            parse_timestamp_ns("1700000000000000000"),
+            Some(1700000000000000000)
+        );
     }
 
     #[test]
     fn test_parse_timestamp_ns_seconds() {
-        assert_eq!(parse_timestamp_ns("1700000000"), Some(1700000000_000_000_000));
+        assert_eq!(
+            parse_timestamp_ns("1700000000"),
+            Some(1700000000_000_000_000)
+        );
     }
 
     #[test]
     fn test_parse_timestamp_ns_milliseconds() {
-        assert_eq!(parse_timestamp_ns("1700000000000"), Some(1700000000_000_000_000));
+        assert_eq!(
+            parse_timestamp_ns("1700000000000"),
+            Some(1700000000_000_000_000)
+        );
     }
 
     #[test]
     fn test_parse_timestamp_ns_microseconds() {
-        assert_eq!(parse_timestamp_ns("1700000000000000"), Some(1700000000_000_000_000));
+        assert_eq!(
+            parse_timestamp_ns("1700000000000000"),
+            Some(1700000000_000_000_000)
+        );
     }
 
     #[test]

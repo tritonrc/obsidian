@@ -122,7 +122,11 @@ impl LogStore {
         // Maintain sorted order for partition_point correctness
         if was_empty {
             // First batch: check if it's already sorted
-            if !stream.entries.windows(2).all(|w| w[0].timestamp_ns <= w[1].timestamp_ns) {
+            if !stream
+                .entries
+                .windows(2)
+                .all(|w| w[0].timestamp_ns <= w[1].timestamp_ns)
+            {
                 stream.entries.sort_by_key(|e| e.timestamp_ns);
             }
         } else if let Some(prev_ts) = prev_last_ts {
@@ -195,7 +199,11 @@ impl LogStore {
                     let mut result = PostingList::new();
                     // Get the IDs to exclude (those that have the exact matching value)
                     let exclude = match value_spur {
-                        Some(vs) => self.label_index.get(&(name_spur, vs)).cloned().unwrap_or_default(),
+                        Some(vs) => self
+                            .label_index
+                            .get(&(name_spur, vs))
+                            .cloned()
+                            .unwrap_or_default(),
                         None => PostingList::new(),
                     };
                     for id in all_ids {
@@ -266,9 +274,7 @@ impl LogStore {
                 let lo = stream
                     .entries
                     .partition_point(|e| e.timestamp_ns < start_ns);
-                let hi = stream
-                    .entries
-                    .partition_point(|e| e.timestamp_ns <= end_ns);
+                let hi = stream.entries.partition_point(|e| e.timestamp_ns <= end_ns);
                 &stream.entries[lo..hi]
             }
             None => &[],

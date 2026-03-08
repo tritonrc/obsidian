@@ -78,7 +78,9 @@ pub async fn query_range(
     if step_ms <= 0 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"status": "error", "errorType": "bad_data", "error": "step must be positive"})),
+            Json(
+                json!({"status": "error", "errorType": "bad_data", "error": "step must be positive"}),
+            ),
         );
     }
 
@@ -147,17 +149,22 @@ pub async fn series(
                 _ => {
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid match[] selector: {}", matchers_str)})),
+                        Json(
+                            json!({"status": "error", "errorType": "bad_data", "error": format!("invalid match[] selector: {}", matchers_str)}),
+                        ),
                     );
                 }
             }
         }
     }
 
-    (StatusCode::OK, Json(json!({
-        "status": "success",
-        "data": all_series,
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "data": all_series,
+        })),
+    )
 }
 
 /// GET /api/v1/labels

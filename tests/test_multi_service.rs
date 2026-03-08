@@ -19,8 +19,15 @@ async fn test_multi_service_query_independently() {
 
     // Query payments only
     let query = urlencoding::encode(r#"{service="payments"}"#);
-    let uri = format!("/loki/api/v1/query?query={}&time=1700000000200000000", query);
-    let req = Request::builder().method("GET").uri(&uri).body(Body::empty()).unwrap();
+    let uri = format!(
+        "/loki/api/v1/query?query={}&time=1700000000200000000",
+        query
+    );
+    let req = Request::builder()
+        .method("GET")
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -31,8 +38,15 @@ async fn test_multi_service_query_independently() {
 
     // Query gateway only
     let query = urlencoding::encode(r#"{service="gateway"}"#);
-    let uri = format!("/loki/api/v1/query?query={}&time=1700000000200000000", query);
-    let req = Request::builder().method("GET").uri(&uri).body(Body::empty()).unwrap();
+    let uri = format!(
+        "/loki/api/v1/query?query={}&time=1700000000200000000",
+        query
+    );
+    let req = Request::builder()
+        .method("GET")
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -52,8 +66,15 @@ async fn test_multi_service_query_with_regex() {
     push_logs(&app, "worker", "job completed", "1700000000200000000").await;
 
     let query = urlencoding::encode(r#"{service=~"payments|gateway"}"#);
-    let uri = format!("/loki/api/v1/query?query={}&time=1700000000300000000", query);
-    let req = Request::builder().method("GET").uri(&uri).body(Body::empty()).unwrap();
+    let uri = format!(
+        "/loki/api/v1/query?query={}&time=1700000000300000000",
+        query
+    );
+    let req = Request::builder()
+        .method("GET")
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();

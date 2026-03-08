@@ -12,10 +12,7 @@ use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, Sta
 use prost::Message;
 use tower::ServiceExt;
 
-fn make_trace_request_raw_ids(
-    trace_id: Vec<u8>,
-    span_id: Vec<u8>,
-) -> ExportTraceServiceRequest {
+fn make_trace_request_raw_ids(trace_id: Vec<u8>, span_id: Vec<u8>) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(Resource {
@@ -63,7 +60,8 @@ async fn test_invalid_trace_id_skipped() {
     let app = obsidian::server::build_router(state.clone());
 
     // Send a span with an invalid trace_id (only 8 bytes instead of 16)
-    let req = make_trace_request_raw_ids(vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    let req =
+        make_trace_request_raw_ids(vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1, 2, 3, 4, 5, 6, 7, 8]);
     let r = Request::builder()
         .method("POST")
         .uri("/v1/traces")
@@ -110,7 +108,7 @@ async fn test_all_zero_trace_id_skipped() {
     let app = obsidian::server::build_router(state.clone());
 
     let req = make_trace_request_raw_ids(
-        vec![0u8; 16],  // all-zero trace_id (valid length but invalid per OTLP spec)
+        vec![0u8; 16], // all-zero trace_id (valid length but invalid per OTLP spec)
         vec![1, 2, 3, 4, 5, 6, 7, 8],
     );
     let r = Request::builder()

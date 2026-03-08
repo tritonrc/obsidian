@@ -31,7 +31,9 @@ async fn test_e2e_otlp_to_obsidian() {
     let app = obsidian::server::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.ok(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
 
     let client = reqwest::Client::new();
     let svc = "e2e-test-svc";
@@ -41,17 +43,34 @@ async fn test_e2e_otlp_to_obsidian() {
         .as_nanos() as u64;
 
     // Ingest metrics
-    let resp = client.post(format!("{}/v1/metrics", base))
+    let resp = client
+        .post(format!("{}/v1/metrics", base))
         .header("content-type", "application/x-protobuf")
         .body(make_gauge_request(svc, "e2e_gauge", 42.0, now_ns).encode_to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 204);
 
     // Ingest traces
-    let resp = client.post(format!("{}/v1/traces", base))
+    let resp = client
+        .post(format!("{}/v1/traces", base))
         .header("content-type", "application/x-protobuf")
-        .body(make_trace_request(svc, "e2e-span", &[0xe2; 16], &[1; 8], now_ns - 1_000_000_000, now_ns, 1).encode_to_vec())
-        .send().await.unwrap();
+        .body(
+            make_trace_request(
+                svc,
+                "e2e-span",
+                &[0xe2; 16],
+                &[1; 8],
+                now_ns - 1_000_000_000,
+                now_ns,
+                1,
+            )
+            .encode_to_vec(),
+        )
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 204);
 
     // Ingest logs
@@ -61,29 +80,78 @@ async fn test_e2e_otlp_to_obsidian() {
     assert_eq!(resp.status(), 204);
 
     // PromQL
-    let json: Value = client.get(format!("{}/api/v1/query?query={}", base, urlencoding::encode(&format!(r#"e2e_gauge{{service="{}"}}"#, svc))))
-        .send().await.unwrap().json().await.unwrap();
+    let json: Value = client
+        .get(format!(
+            "{}/api/v1/query?query={}",
+            base,
+            urlencoding::encode(&format!(r#"e2e_gauge{{service="{}"}}"#, svc))
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(json["status"], "success");
-    let val: f64 = json["data"]["result"][0]["value"][1].as_str().unwrap().parse().unwrap();
+    let val: f64 = json["data"]["result"][0]["value"][1]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!((val - 42.0).abs() < 0.01);
 
     // TraceQL
-    let json: Value = client.get(format!("{}/api/search?q={}", base, urlencoding::encode(&format!(r#"{{ resource.service.name = "{}" }}"#, svc))))
-        .send().await.unwrap().json().await.unwrap();
+    let json: Value = client
+        .get(format!(
+            "{}/api/search?q={}",
+            base,
+            urlencoding::encode(&format!(r#"{{ resource.service.name = "{}" }}"#, svc))
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(!json["traces"].as_array().unwrap().is_empty());
 
     // LogQL
-    let json: Value = client.get(format!("{}/loki/api/v1/query?query={}", base, urlencoding::encode(&format!(r#"{{service="{}"}}"#, svc))))
-        .send().await.unwrap().json().await.unwrap();
+    let json: Value = client
+        .get(format!(
+            "{}/loki/api/v1/query?query={}",
+            base,
+            urlencoding::encode(&format!(r#"{{service="{}"}}"#, svc))
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(!json["data"]["result"].as_array().unwrap().is_empty());
 
     // Services — all three signals present
-    let json: Value = client.get(format!("{}/api/v1/services", base))
-        .send().await.unwrap().json().await.unwrap();
-    let svc_entry = json["data"]["services"].as_array().unwrap()
-        .iter().find(|s| s["name"].as_str() == Some(svc)).unwrap().clone();
-    let signals: Vec<&str> = svc_entry["signals"].as_array().unwrap()
-        .iter().filter_map(|s| s.as_str()).collect();
+    let json: Value = client
+        .get(format!("{}/api/v1/services", base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let svc_entry = json["data"]["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"].as_str() == Some(svc))
+        .unwrap()
+        .clone();
+    let signals: Vec<&str> = svc_entry["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.as_str())
+        .collect();
     assert!(signals.contains(&"metrics"));
     assert!(signals.contains(&"traces"));
     assert!(signals.contains(&"logs"));
