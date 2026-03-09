@@ -1,8 +1,33 @@
 # Obsidian
 
-Lightweight, ephemeral observability engine. A single Rust binary that exposes LogQL, PromQL, and TraceQL query surfaces over in-memory stores — designed to be booted per git worktree so agents can inspect logs, metrics, and traces while they work.
+Getting observability into a development harness is usually expensive: you need a metrics collector, a log aggregator, a trace backend, each with its own config, ports, and lifecycle. When you're running multiple agents in parallel across git worktrees — each worktree a full isolated environment — that cost multiplies.
 
-Services send OTLP directly to Obsidian. All three signal types share a single port. Everything lives in memory with optional snapshot-to-disk.
+Obsidian collapses it to a single binary. One process, one port, three query surfaces (LogQL, PromQL, TraceQL) over in-memory stores. Drop it into your worktree boot script and it's gone when the worktree is. Services point their OTLP exporter at it directly — no collector, no sidecar, no config file.
+
+---
+
+## The Worktree Model
+
+Each git worktree runs an independent copy of your services. Obsidian boots alongside them:
+
+```bash
+#!/bin/bash
+# boot.sh — start everything for this worktree
+
+obsidian --port 4320 --retention 2h &
+
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4320 \
+OTEL_SERVICE_NAME=api-gateway \
+  ./api-gateway &
+
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4320 \
+OTEL_SERVICE_NAME=payments \
+  ./payments-engine &
+```
+
+All services in the worktree share one Obsidian instance. Each agent working in its own worktree gets its own isolated Obsidian. When the worktree is discarded, so is the telemetry.
+
+Running 8 agents in parallel across 8 worktrees means 8 independent Obsidian instances — no cross-contamination, no coordination, no shared state to clean up.
 
 ---
 
@@ -44,17 +69,19 @@ OPTIONS:
     --restore                      Restore from snapshot on startup
 ```
 
-Basic start:
+For parallel worktrees, derive the port from the worktree name to avoid conflicts:
 
 ```bash
-obsidian --port 4320 --retention 2h
+PORT=$(( ($(basename $(git rev-parse --show-toplevel) | cksum | cut -d' ' -f1) % 1000) + 4000 ))
+obsidian --port $PORT --retention 2h &
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:$PORT
 ```
 
 ---
 
 ## Ingestion
 
-All ingest endpoints accept data on the same port as queries.
+All ingest endpoints share the same port as queries — no separate collector process.
 
 | Signal | Endpoint | Format |
 |--------|----------|--------|
@@ -62,11 +89,31 @@ All ingest endpoints accept data on the same port as queries.
 | Metrics | `POST /v1/metrics` | OTLP protobuf |
 | Traces | `POST /v1/traces` | OTLP protobuf |
 
-Configure your services to export OTLP to `http://localhost:4320`. The `resource.service.name` attribute is promoted to a `service` label in all stores, so `{service="payments"}` works identically in LogQL and PromQL.
+The `resource.service.name` attribute from OTLP is promoted to a `service` label in all stores. This means `{service="payments"}` works the same in LogQL and PromQL, and agents can query by service name without knowing which signal type to look in first.
 
 ---
 
 ## Querying
+
+### Service Discovery — start here
+
+Before writing targeted queries, find out what's reporting:
+
+```
+GET /api/v1/services
+```
+
+```json
+{
+  "status": "success",
+  "data": {
+    "services": [
+      { "name": "api-gateway", "signals": ["logs", "metrics", "traces"] },
+      { "name": "payments",    "signals": ["logs", "metrics", "traces"] }
+    ]
+  }
+}
+```
 
 ### LogQL
 
@@ -77,20 +124,10 @@ GET /loki/api/v1/labels
 GET /loki/api/v1/label/{name}/values
 ```
 
-Supported syntax:
-
 ```logql
-# Stream selectors
 {service="payments", level="error"}
-{service=~"pay.*"}
-{level!="debug"}
-
-# Line filters
-{service="payments"} |= "timeout"
+{service=~"pay.*"} |= "timeout"
 {service="payments"} |~ "error|warn"
-{service="payments"} != "healthcheck"
-
-# Metric queries
 rate({service="payments"} |= "error" [1m])
 count_over_time({service="payments"}[5m])
 ```
@@ -105,23 +142,11 @@ GET /api/v1/labels
 GET /api/v1/label/{name}/values
 ```
 
-Supported syntax:
-
 ```promql
-# Selectors and label matchers
-http_requests_total{method="GET", status!="500"}
 http_requests_total{service=~"api-gateway|payments"}
-
-# Functions
 rate(http_requests_total[5m])
-increase(http_requests_total[1h])
-histogram_quantile(0.99, rate(request_duration_bucket[5m]))
-
-# Aggregation
 sum(rate(http_requests_total[5m])) by (service)
-avg(request_duration_seconds) by (endpoint)
-
-# Binary operators
+histogram_quantile(0.99, rate(request_duration_bucket[5m]))
 rate(errors_total[5m]) / rate(requests_total[5m]) * 100
 ```
 
@@ -132,67 +157,29 @@ GET /api/search?q={resource.service.name="payments"&&duration>500ms}
 GET /api/traces/{traceID}
 ```
 
-Supported syntax:
-
 ```traceql
-{ resource.service.name = "payments" }
-{ span.http.status_code = 500 }
-{ status = error }
-{ duration > 500ms }
 { resource.service.name = "payments" && duration > 200ms }
+{ span.http.status_code = 500 }
 { status = error || span.http.status_code >= 500 }
 ```
 
 ---
 
-## Service Discovery
+## Status and Health
 
 ```
-GET /api/v1/services   — all known service names across logs, metrics, and traces
-GET /api/v1/status     — entry/sample/span counts, uptime
-GET /ready             — health check
+GET /api/v1/status    — entry/sample/span counts, uptime
+GET /ready            — health check (200 when ready)
 ```
-
-```json
-// GET /api/v1/services
-{
-  "status": "success",
-  "data": {
-    "services": [
-      { "name": "api-gateway", "signals": ["logs", "metrics", "traces"] },
-      { "name": "payments",    "signals": ["logs", "metrics", "traces"] }
-    ]
-  }
-}
-```
-
----
-
-## Worktree Setup
-
-Start Obsidian once, then point all services at it:
-
-```bash
-obsidian --port 4320 --retention 2h &
-
-# Services export OTLP directly to Obsidian
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4320 \
-OTEL_SERVICE_NAME=api-gateway \
-  ./api-gateway &
-
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4320 \
-OTEL_SERVICE_NAME=payments \
-  ./payments-engine &
-```
-
-For logs, configure your logging library or Vector to push to `http://localhost:4320/loki/api/v1/push`.
 
 ---
 
 ## Snapshots
 
+Useful when an agent needs to hand off state to a new session:
+
 ```bash
-# Manual snapshot via signal
+# On-demand snapshot
 kill -USR1 $(pgrep obsidian)
 
 # Auto-snapshot every 60 seconds
@@ -206,9 +193,10 @@ obsidian --restore --snapshot-dir .obsidian/
 
 ## What It's Not
 
-- No authentication or TLS — local use only
-- No WAL or durable storage (snapshots are sufficient)
-- No alerting or recording rules
-- No streaming queries
-- No gRPC (OTLP/HTTP only)
-- Not a replacement for Loki, Prometheus, or Tempo in production
+Obsidian is purpose-built for ephemeral agent workflows. It is not:
+
+- A production observability backend
+- A replacement for Loki, Prometheus, or Tempo
+- Persistent (no WAL — snapshots only)
+- Authenticated (local use only, no TLS)
+- Clustered (single node, single process)
