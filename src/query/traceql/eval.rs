@@ -112,31 +112,31 @@ fn eval_structural(
                 rhs_results.iter().map(|r| (r.trace_id, r)).collect();
 
             for lhs_result in &lhs_results {
-                if let Some(rhs_result) = rhs_by_trace.get(&lhs_result.trace_id) {
-                    if let Some(trace_spans) = store.get_trace(&lhs_result.trace_id) {
-                        // Build span_map ONCE per trace, not per pair
-                        let span_map: FxHashMap<[u8; 8], &Span> =
-                            trace_spans.iter().map(|s| (s.span_id, s)).collect();
+                if let Some(rhs_result) = rhs_by_trace.get(&lhs_result.trace_id)
+                    && let Some(trace_spans) = store.get_trace(&lhs_result.trace_id)
+                {
+                    // Build span_map ONCE per trace, not per pair
+                    let span_map: FxHashMap<[u8; 8], &Span> =
+                        trace_spans.iter().map(|s| (s.span_id, s)).collect();
 
-                        let mut matched = Vec::new();
+                    let mut matched = Vec::new();
 
-                        for lhs_span in &lhs_result.matched_spans {
-                            for rhs_span in &rhs_result.matched_spans {
-                                if is_descendant(lhs_span.span_id, rhs_span.span_id, &span_map) {
-                                    matched.push(rhs_span.clone());
-                                }
+                    for lhs_span in &lhs_result.matched_spans {
+                        for rhs_span in &rhs_result.matched_spans {
+                            if is_descendant(lhs_span.span_id, rhs_span.span_id, &span_map) {
+                                matched.push(rhs_span.clone());
                             }
                         }
+                    }
 
-                        if !matched.is_empty() {
-                            // Deduplicate
-                            matched.sort_by_key(|s| s.span_id);
-                            matched.dedup_by_key(|s| s.span_id);
-                            results.push(TraceResult {
-                                trace_id: lhs_result.trace_id,
-                                matched_spans: matched,
-                            });
-                        }
+                    if !matched.is_empty() {
+                        // Deduplicate
+                        matched.sort_by_key(|s| s.span_id);
+                        matched.dedup_by_key(|s| s.span_id);
+                        results.push(TraceResult {
+                            trace_id: lhs_result.trace_id,
+                            matched_spans: matched,
+                        });
                     }
                 }
             }

@@ -1,9 +1,9 @@
 //! Service discovery endpoint.
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::store::SharedState;
 

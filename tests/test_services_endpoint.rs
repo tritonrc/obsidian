@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use helpers::{ingest_metrics, ingest_traces, make_state, push_logs};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -44,20 +44,26 @@ async fn test_services_endpoint_all_signals() {
     assert_eq!(services.len(), 3);
 
     assert_eq!(services[0]["name"], "gateway");
-    assert!(services[0]["signals"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("metrics")));
+    assert!(
+        services[0]["signals"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("metrics"))
+    );
     assert_eq!(services[1]["name"], "payments");
-    assert!(services[1]["signals"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("logs")));
+    assert!(
+        services[1]["signals"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("logs"))
+    );
     assert_eq!(services[2]["name"], "worker");
-    assert!(services[2]["signals"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("traces")));
+    assert!(
+        services[2]["signals"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("traces"))
+    );
 }
 
 #[tokio::test]

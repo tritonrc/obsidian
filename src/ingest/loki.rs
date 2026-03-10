@@ -8,8 +8,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 
-use crate::store::log_store::LogEntry;
 use crate::store::SharedState;
+use crate::store::log_store::LogEntry;
 
 /// Loki push JSON format.
 #[derive(Debug, Deserialize)]

@@ -4,11 +4,11 @@
 //! logical operators, and structural operators.
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{char, multispace0},
     combinator::map,
-    IResult,
 };
 use std::time::Duration;
 use thiserror::Error;
@@ -179,7 +179,7 @@ fn parse_conditions(input: &str) -> IResult<&str, (Vec<SpanCondition>, Vec<Logic
             Err(_) => break,
         };
         if let Ok((rest, op_str)) =
-            alt::<&str, &str, nom::error::Error<&str>, _>((tag("&&"), tag("||")))(trimmed)
+            alt((tag::<_, _, nom::error::Error<&str>>("&&"), tag("||"))).parse_complete(trimmed)
         {
             let op = if op_str == "&&" {
                 LogicalOp::And
@@ -246,7 +246,8 @@ fn parse_status_condition(input: &str) -> IResult<&str, SpanCondition> {
         map(tag("error"), |_| SpanStatusValue::Error),
         map(tag("ok"), |_| SpanStatusValue::Ok),
         map(tag("unset"), |_| SpanStatusValue::Unset),
-    ))(input)?;
+    ))
+    .parse_complete(input)?;
     Ok((input, SpanCondition::Status { op, value: status }))
 }
 
@@ -301,14 +302,16 @@ fn parse_compare_op(input: &str) -> IResult<&str, CompareOp> {
         map(tag("="), |_| CompareOp::Eq),
         map(tag(">"), |_| CompareOp::Gt),
         map(tag("<"), |_| CompareOp::Lt),
-    ))(input)
+    ))
+    .parse_complete(input)
 }
 
 fn parse_span_value(input: &str) -> IResult<&str, SpanValue> {
     alt((
         map(parse_quoted_string, SpanValue::String),
         parse_numeric_value,
-    ))(input)
+    ))
+    .parse_complete(input)
 }
 
 fn parse_numeric_value(input: &str) -> IResult<&str, SpanValue> {
@@ -362,7 +365,7 @@ fn parse_quoted_string(input: &str) -> IResult<&str, String> {
 
 fn parse_duration_value(input: &str) -> IResult<&str, Duration> {
     let (input, num_str) = take_while1(|c: char| c.is_ascii_digit() || c == '.')(input)?;
-    let (input, unit) = alt((tag("ms"), tag("s"), tag("m"), tag("h")))(input)?;
+    let (input, unit) = alt((tag("ms"), tag("s"), tag("m"), tag("h"))).parse_complete(input)?;
 
     let num: f64 = num_str.parse().map_err(|_| {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Float))

@@ -4,9 +4,9 @@ use axum::body::Body;
 use axum::http::Request;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
 use opentelemetry_proto::tonic::metrics::v1::{
-    metric, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, Status};
@@ -52,6 +52,7 @@ pub fn make_gauge_request(
                     }),
                 }],
                 dropped_attributes_count: 0,
+                entity_refs: vec![],
             }),
             scope_metrics: vec![ScopeMetrics {
                 scope: None,
@@ -99,6 +100,7 @@ pub fn make_trace_request(
                     }),
                 }],
                 dropped_attributes_count: 0,
+                entity_refs: vec![],
             }),
             scope_spans: vec![ScopeSpans {
                 scope: None,

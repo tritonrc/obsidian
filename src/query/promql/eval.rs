@@ -124,14 +124,14 @@ fn eval_vector_selector(
 ) -> Result<PromQLResult, PromQLError> {
     let mut matchers = convert_matchers(&vs.matchers);
     // If the selector has a name (e.g. `http_requests_total`), add __name__ matcher
-    if let Some(name) = &vs.name {
-        if !matchers.iter().any(|m| m.name == "__name__") {
-            matchers.push(LabelMatcher {
-                name: "__name__".to_string(),
-                op: LabelMatchOp::Eq,
-                value: name.clone(),
-            });
-        }
+    if let Some(name) = &vs.name
+        && !matchers.iter().any(|m| m.name == "__name__")
+    {
+        matchers.push(LabelMatcher {
+            name: "__name__".to_string(),
+            op: LabelMatchOp::Eq,
+            value: name.clone(),
+        });
     }
     let series_ids = store.select_series(&matchers);
 
@@ -185,14 +185,14 @@ fn eval_matrix_selector(
 ) -> Result<PromQLResult, PromQLError> {
     let vs = &ms.vs;
     let mut matchers = convert_matchers(&vs.matchers);
-    if let Some(name) = &vs.name {
-        if !matchers.iter().any(|m| m.name == "__name__") {
-            matchers.push(LabelMatcher {
-                name: "__name__".to_string(),
-                op: LabelMatchOp::Eq,
-                value: name.clone(),
-            });
-        }
+    if let Some(name) = &vs.name
+        && !matchers.iter().any(|m| m.name == "__name__")
+    {
+        matchers.push(LabelMatcher {
+            name: "__name__".to_string(),
+            op: LabelMatchOp::Eq,
+            value: name.clone(),
+        });
     }
     let series_ids = store.select_series(&matchers);
     let range_ms = ms.range.as_millis() as i64;
@@ -251,7 +251,7 @@ fn eval_call(
                 _ => {
                     return Err(PromQLError::Eval(
                         "first arg to histogram_quantile must be scalar".into(),
-                    ))
+                    ));
                 }
             };
             let buckets_result = eval_expr(
@@ -300,19 +300,19 @@ fn eval_rate_like(
         _ => {
             return Err(PromQLError::Eval(
                 "rate/increase requires matrix selector".into(),
-            ))
+            ));
         }
     };
 
     let mut matchers = convert_matchers(&vs.matchers);
-    if let Some(name) = &vs.name {
-        if !matchers.iter().any(|m| m.name == "__name__") {
-            matchers.push(LabelMatcher {
-                name: "__name__".to_string(),
-                op: LabelMatchOp::Eq,
-                value: name.clone(),
-            });
-        }
+    if let Some(name) = &vs.name
+        && !matchers.iter().any(|m| m.name == "__name__")
+    {
+        matchers.push(LabelMatcher {
+            name: "__name__".to_string(),
+            op: LabelMatchOp::Eq,
+            value: name.clone(),
+        });
     }
     let series_ids = store.select_series(&matchers);
 
@@ -675,7 +675,7 @@ fn eval_histogram_quantile(
         _ => {
             return Err(PromQLError::Eval(
                 "histogram_quantile requires instant vector".into(),
-            ))
+            ));
         }
     };
 
@@ -714,7 +714,7 @@ fn eval_histogram_quantile(
         buckets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // For each timestamp, compute quantile
-        if let Some((_, ref first_samples)) = buckets.first() {
+        if let Some((_, first_samples)) = buckets.first() {
             let timestamps: Vec<i64> = first_samples.iter().map(|(t, _)| *t).collect();
             let mut samples = Vec::new();
 

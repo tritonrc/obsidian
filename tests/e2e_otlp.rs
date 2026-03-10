@@ -6,7 +6,7 @@ mod helpers;
 use helpers::{make_gauge_request, make_trace_request};
 use parking_lot::RwLock;
 use prost::Message;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[tokio::test]

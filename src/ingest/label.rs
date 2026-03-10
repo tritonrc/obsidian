@@ -1,6 +1,6 @@
 //! Shared label extraction and service name promotion utilities.
 
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 
 /// Extract labels from an OTLP Resource as (key, value) string pairs.
@@ -60,9 +60,11 @@ mod tests {
             ("host".into(), "server1".into()),
         ];
         promote_service_name(&mut labels);
-        assert!(labels
-            .iter()
-            .any(|(k, v)| k == "service" && v == "payments"));
+        assert!(
+            labels
+                .iter()
+                .any(|(k, v)| k == "service" && v == "payments")
+        );
         assert!(!labels.iter().any(|(k, _)| k == "service.name"));
     }
 

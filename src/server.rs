@@ -1,7 +1,7 @@
 //! Axum router setup with all routes.
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 
 use crate::api;
 use crate::ingest;
@@ -23,7 +23,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/loki/api/v1/labels", get(logql::handlers::labels))
         .route(
-            "/loki/api/v1/label/:name/values",
+            "/loki/api/v1/label/{name}/values",
             get(logql::handlers::label_values),
         )
         // PromQL
@@ -32,12 +32,12 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/v1/series", get(promql::handlers::series))
         .route("/api/v1/labels", get(promql::handlers::labels))
         .route(
-            "/api/v1/label/:name/values",
+            "/api/v1/label/{name}/values",
             get(promql::handlers::label_values),
         )
         // TraceQL
         .route("/api/search", get(traceql::handlers::search))
-        .route("/api/traces/:trace_id", get(traceql::handlers::get_trace))
+        .route("/api/traces/{trace_id}", get(traceql::handlers::get_trace))
         // Service discovery & health
         .route("/api/v1/services", get(api::services::list_services))
         .route("/api/v1/status", get(api::status::status))

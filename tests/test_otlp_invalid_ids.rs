@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use helpers::make_state;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
@@ -23,6 +23,7 @@ fn make_trace_request_raw_ids(trace_id: Vec<u8>, span_id: Vec<u8>) -> ExportTrac
                     }),
                 }],
                 dropped_attributes_count: 0,
+                entity_refs: vec![],
             }),
             scope_spans: vec![ScopeSpans {
                 scope: None,

@@ -3,13 +3,12 @@
 //! Supports stream selectors, pipeline stages, and metric queries.
 
 use nom::{
+    IResult, Parser,
     branch::alt,
-    bytes::complete::{tag, take_while1},
-    character::complete::{char, multispace0},
+    bytes::tag,
+    character::{char, multispace0},
     combinator::map,
     multi::separated_list0,
-    sequence::delimited,
-    IResult,
 };
 use regex::Regex;
 use std::time::Duration;
@@ -108,15 +107,16 @@ fn parse_metric_query(input: &str) -> IResult<&str, LogQLExpr> {
         map(tag("count_over_time"), |_| MetricFunc::CountOverTime),
         map(tag("rate"), |_| MetricFunc::Rate),
         map(tag("bytes_over_time"), |_| MetricFunc::BytesOverTime),
-    ))(input)?;
+    ))
+    .parse_complete(input)?;
 
-    let (input, _) = char('(')(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(').parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, inner) = parse_pipeline_or_selector(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, range) = parse_range(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, _) = char(')').parse_complete(input)?;
 
     Ok((
         input,
@@ -129,9 +129,10 @@ fn parse_metric_query(input: &str) -> IResult<&str, LogQLExpr> {
 }
 
 fn parse_range(input: &str) -> IResult<&str, Duration> {
-    let (input, _) = char('[')(input)?;
-    let (input, dur_str) = take_while1(|c: char| c.is_alphanumeric())(input)?;
-    let (input, _) = char(']')(input)?;
+    let (input, _) = char('[').parse_complete(input)?;
+    let (input, dur_str) =
+        nom::bytes::take_while1(|c: char| c.is_alphanumeric()).parse_complete(input)?;
+    let (input, _) = char(']').parse_complete(input)?;
 
     let duration = parse_duration(dur_str).ok_or_else(|| {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
@@ -142,7 +143,7 @@ fn parse_range(input: &str) -> IResult<&str, Duration> {
 
 fn parse_pipeline_or_selector(input: &str) -> IResult<&str, LogQLExpr> {
     let (input, selector) = parse_stream_selector(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
 
     // Try to parse pipeline stages
     let mut stages = Vec::new();
@@ -171,30 +172,30 @@ fn parse_pipeline_or_selector(input: &str) -> IResult<&str, LogQLExpr> {
 }
 
 fn parse_stream_selector(input: &str) -> IResult<&str, LogQLExpr> {
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char('{')(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, matchers) = separated_list0(
-        delimited(multispace0, char(','), multispace0),
-        parse_matcher,
-    )(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char('}')(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, _) = char('{').parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, matchers) = separated_list0(char(','), parse_matcher).parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, _) = char('}').parse_complete(input)?;
 
     Ok((input, LogQLExpr::StreamSelector { matchers }))
 }
 
 fn parse_matcher(input: &str) -> IResult<&str, LogQLMatcher> {
-    let (input, _) = multispace0(input)?;
-    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, name) =
+        nom::bytes::take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+            .parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, op) = alt((
         map(tag("=~"), |_| MatchOp::Regex),
         map(tag("!~"), |_| MatchOp::NotRegex),
         map(tag("!="), |_| MatchOp::Neq),
         map(tag("="), |_| MatchOp::Eq),
-    ))(input)?;
-    let (input, _) = multispace0(input)?;
+    ))
+    .parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, value) = parse_quoted_string(input)?;
 
     Ok((
@@ -208,7 +209,7 @@ fn parse_matcher(input: &str) -> IResult<&str, LogQLMatcher> {
 }
 
 fn parse_quoted_string(input: &str) -> IResult<&str, String> {
-    let (input, _) = char('"')(input)?;
+    let (input, _) = char('"').parse_complete(input)?;
     let mut result = String::new();
     let mut chars = input.char_indices();
     loop {
@@ -247,26 +248,27 @@ fn parse_pipeline_stage(input: &str) -> IResult<&str, PipelineStage> {
         parse_line_not_contains,
         parse_line_regex,
         parse_line_not_regex,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn parse_line_contains(input: &str) -> IResult<&str, PipelineStage> {
-    let (input, _) = tag("|=")(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("|=").parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, pattern) = parse_quoted_string(input)?;
     Ok((input, PipelineStage::LineContains(pattern)))
 }
 
 fn parse_line_not_contains(input: &str) -> IResult<&str, PipelineStage> {
-    let (input, _) = tag("!=")(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("!=").parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, pattern) = parse_quoted_string(input)?;
     Ok((input, PipelineStage::LineNotContains(pattern)))
 }
 
 fn parse_line_regex(input: &str) -> IResult<&str, PipelineStage> {
-    let (input, _) = tag("|~")(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("|~").parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, pattern) = parse_quoted_string(input)?;
     let re = Regex::new(&pattern).map_err(|_| {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
@@ -275,8 +277,8 @@ fn parse_line_regex(input: &str) -> IResult<&str, PipelineStage> {
 }
 
 fn parse_line_not_regex(input: &str) -> IResult<&str, PipelineStage> {
-    let (input, _) = tag("!~")(input)?;
-    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("!~").parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
     let (input, pattern) = parse_quoted_string(input)?;
     let re = Regex::new(&pattern).map_err(|_| {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))

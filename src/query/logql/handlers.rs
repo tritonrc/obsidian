@@ -1,13 +1,13 @@
 //! Axum handlers for LogQL query endpoints.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::eval::{evaluate_logql, LogQLResult};
+use super::eval::{LogQLResult, evaluate_logql};
 use super::parser::parse_logql;
 use crate::store::SharedState;
 

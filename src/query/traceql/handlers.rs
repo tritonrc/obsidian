@@ -1,16 +1,16 @@
 //! Axum handlers for TraceQL query endpoints.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::eval::evaluate_traceql;
 use super::parser::parse_traceql;
-use crate::store::trace_store::SpanStatus;
 use crate::store::SharedState;
+use crate::store::trace_store::SpanStatus;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {

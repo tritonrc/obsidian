@@ -1,15 +1,15 @@
 //! Axum handlers for PromQL query endpoints.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::eval::{evaluate_instant, evaluate_range, PromQLResult, SeriesResult};
-use crate::store::log_store::{LabelMatchOp, LabelMatcher};
+use super::eval::{PromQLResult, SeriesResult, evaluate_instant, evaluate_range};
 use crate::store::SharedState;
+use crate::store::log_store::{LabelMatchOp, LabelMatcher};
 
 #[derive(Debug, Deserialize)]
 pub struct InstantQueryParams {
@@ -135,14 +135,14 @@ pub async fn series(
                         .collect();
                     let ids = store.select_series(&matchers);
                     for id in ids {
-                        if seen_ids.insert(id) {
-                            if let Some(labels) = store.get_series_labels(id) {
-                                let map: serde_json::Map<String, Value> = labels
-                                    .into_iter()
-                                    .map(|(k, v)| (k, Value::String(v)))
-                                    .collect();
-                                all_series.push(Value::Object(map));
-                            }
+                        if seen_ids.insert(id)
+                            && let Some(labels) = store.get_series_labels(id)
+                        {
+                            let map: serde_json::Map<String, Value> = labels
+                                .into_iter()
+                                .map(|(k, v)| (k, Value::String(v)))
+                                .collect();
+                            all_series.push(Value::Object(map));
                         }
                     }
                 }

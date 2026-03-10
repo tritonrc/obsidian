@@ -9,7 +9,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use super::posting_list::{intersect, union, PostingList};
+use super::posting_list::{PostingList, intersect, union};
 
 /// Unique identifier for a metric series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -124,13 +124,12 @@ impl MetricStore {
             {
                 series.samples.sort_by_key(|s| s.timestamp_ms);
             }
-        } else if let Some(prev_ts) = prev_last_ts {
-            if series.samples[series.samples.len() - sample_count..]
+        } else if let Some(prev_ts) = prev_last_ts
+            && series.samples[series.samples.len() - sample_count..]
                 .iter()
                 .any(|s| s.timestamp_ms < prev_ts)
-            {
-                series.samples.sort_by_key(|s| s.timestamp_ms);
-            }
+        {
+            series.samples.sort_by_key(|s| s.timestamp_ms);
         }
 
         // Only update indexes for new series
@@ -237,10 +236,10 @@ impl MetricStore {
                     if let Some(values) = self.label_values.get(&name_spur) {
                         for &vs in values {
                             let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str) {
-                                if let Some(pl) = self.label_index.get(&(name_spur, vs)) {
-                                    result = union(&result, pl);
-                                }
+                            if re.is_match(val_str)
+                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
+                            {
+                                result = union(&result, pl);
                             }
                         }
                     }
@@ -260,10 +259,10 @@ impl MetricStore {
                     if let Some(values) = self.label_values.get(&name_spur) {
                         for &vs in values {
                             let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str) {
-                                if let Some(pl) = self.label_index.get(&(name_spur, vs)) {
-                                    exclude = union(&exclude, pl);
-                                }
+                            if re.is_match(val_str)
+                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
+                            {
+                                exclude = union(&exclude, pl);
                             }
                         }
                     }
@@ -361,34 +360,34 @@ impl MetricStore {
                 series.samples.drain(..drain);
                 remaining -= drain;
                 self.total_samples -= drain;
-                if series.samples.is_empty() {
-                    if let Some(series) = self.series.remove(&sid) {
-                        // Clean up label_index
-                        for &(k, v) in &series.labels {
-                            if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                                pl.remove(sid);
-                                if pl.is_empty() {
-                                    self.label_index.remove(&(k, v));
-                                    if let Some(vals) = self.label_values.get_mut(&k) {
-                                        vals.remove(&v);
-                                        if vals.is_empty() {
-                                            self.label_values.remove(&k);
-                                        }
+                if series.samples.is_empty()
+                    && let Some(series) = self.series.remove(&sid)
+                {
+                    // Clean up label_index
+                    for &(k, v) in &series.labels {
+                        if let Some(pl) = self.label_index.get_mut(&(k, v)) {
+                            pl.remove(sid);
+                            if pl.is_empty() {
+                                self.label_index.remove(&(k, v));
+                                if let Some(vals) = self.label_values.get_mut(&k) {
+                                    vals.remove(&v);
+                                    if vals.is_empty() {
+                                        self.label_values.remove(&k);
                                     }
                                 }
                             }
                         }
-                        // Clean up name_index
-                        let name_key = self.interner.get("__name__");
-                        if let Some(name_key) = name_key {
-                            for &(k, v) in &series.labels {
-                                if k == name_key {
-                                    if let Some(pl) = self.name_index.get_mut(&v) {
-                                        pl.remove(sid);
-                                        if pl.is_empty() {
-                                            self.name_index.remove(&v);
-                                        }
-                                    }
+                    }
+                    // Clean up name_index
+                    let name_key = self.interner.get("__name__");
+                    if let Some(name_key) = name_key {
+                        for &(k, v) in &series.labels {
+                            if k == name_key
+                                && let Some(pl) = self.name_index.get_mut(&v)
+                            {
+                                pl.remove(sid);
+                                if pl.is_empty() {
+                                    self.name_index.remove(&v);
                                 }
                             }
                         }
@@ -436,12 +435,12 @@ impl MetricStore {
                 let name_key = self.interner.get("__name__");
                 if let Some(name_key) = name_key {
                     for &(k, v) in &series.labels {
-                        if k == name_key {
-                            if let Some(pl) = self.name_index.get_mut(&v) {
-                                pl.remove(series_id);
-                                if pl.is_empty() {
-                                    self.name_index.remove(&v);
-                                }
+                        if k == name_key
+                            && let Some(pl) = self.name_index.get_mut(&v)
+                        {
+                            pl.remove(series_id);
+                            if pl.is_empty() {
+                                self.name_index.remove(&v);
                             }
                         }
                     }

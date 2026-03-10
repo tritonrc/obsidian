@@ -11,8 +11,8 @@ use opentelemetry_proto::tonic::metrics::v1::metric::Data;
 use prost::Message;
 
 use super::label::{extract_resource_labels, promote_service_name};
-use crate::store::metric_store::Sample;
 use crate::store::SharedState;
+use crate::store::metric_store::Sample;
 
 /// Handler for POST /v1/metrics.
 pub async fn metrics_handler(State(state): State<SharedState>, body: Bytes) -> impl IntoResponse {
@@ -137,10 +137,10 @@ fn build_dp_labels(
     }
     let mut labels = resource_labels.to_vec();
     for attr in attrs {
-        if let Some(val) = &attr.value {
-            if let Some(s) = any_value_to_string(val) {
-                labels.push((attr.key.clone(), s));
-            }
+        if let Some(val) = &attr.value
+            && let Some(s) = any_value_to_string(val)
+        {
+            labels.push((attr.key.clone(), s));
         }
     }
     labels

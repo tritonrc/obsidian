@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use super::posting_list::{intersect, union, PostingList};
+use super::posting_list::{PostingList, intersect, union};
 
 /// Unique identifier for a log stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -129,13 +129,12 @@ impl LogStore {
             {
                 stream.entries.sort_by_key(|e| e.timestamp_ns);
             }
-        } else if let Some(prev_ts) = prev_last_ts {
-            if stream.entries[stream.entries.len() - entry_count..]
+        } else if let Some(prev_ts) = prev_last_ts
+            && stream.entries[stream.entries.len() - entry_count..]
                 .iter()
                 .any(|e| e.timestamp_ns < prev_ts)
-            {
-                stream.entries.sort_by_key(|e| e.timestamp_ns);
-            }
+        {
+            stream.entries.sort_by_key(|e| e.timestamp_ns);
         }
 
         // Only update inverted index for new streams
@@ -222,10 +221,10 @@ impl LogStore {
                     if let Some(values) = self.label_values.get(&name_spur) {
                         for &vs in values {
                             let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str) {
-                                if let Some(pl) = self.label_index.get(&(name_spur, vs)) {
-                                    result = union(&result, pl);
-                                }
+                            if re.is_match(val_str)
+                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
+                            {
+                                result = union(&result, pl);
                             }
                         }
                     }
@@ -245,10 +244,10 @@ impl LogStore {
                     if let Some(values) = self.label_values.get(&name_spur) {
                         for &vs in values {
                             let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str) {
-                                if let Some(pl) = self.label_index.get(&(name_spur, vs)) {
-                                    exclude = union(&exclude, pl);
-                                }
+                            if re.is_match(val_str)
+                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
+                            {
+                                exclude = union(&exclude, pl);
                             }
                         }
                     }
@@ -384,18 +383,18 @@ impl LogStore {
                 stream.entries.drain(..drain);
                 remaining -= drain;
                 self.total_entries -= drain;
-                if stream.entries.is_empty() {
-                    if let Some(stream) = self.streams.remove(&sid) {
-                        for &(k, v) in &stream.labels {
-                            if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                                pl.remove(sid);
-                                if pl.is_empty() {
-                                    self.label_index.remove(&(k, v));
-                                    if let Some(vals) = self.label_values.get_mut(&k) {
-                                        vals.remove(&v);
-                                        if vals.is_empty() {
-                                            self.label_values.remove(&k);
-                                        }
+                if stream.entries.is_empty()
+                    && let Some(stream) = self.streams.remove(&sid)
+                {
+                    for &(k, v) in &stream.labels {
+                        if let Some(pl) = self.label_index.get_mut(&(k, v)) {
+                            pl.remove(sid);
+                            if pl.is_empty() {
+                                self.label_index.remove(&(k, v));
+                                if let Some(vals) = self.label_values.get_mut(&k) {
+                                    vals.remove(&v);
+                                    if vals.is_empty() {
+                                        self.label_values.remove(&k);
                                     }
                                 }
                             }

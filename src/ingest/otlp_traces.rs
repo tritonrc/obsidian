@@ -12,8 +12,8 @@ use prost::Message;
 use smallvec::SmallVec;
 
 use super::label::extract_resource_labels;
-use crate::store::trace_store::{AttributeValue, Span, SpanStatus};
 use crate::store::SharedState;
+use crate::store::trace_store::{AttributeValue, Span, SpanStatus};
 
 /// Handler for POST /v1/traces.
 pub async fn traces_handler(State(state): State<SharedState>, body: Bytes) -> impl IntoResponse {
