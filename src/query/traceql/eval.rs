@@ -187,7 +187,7 @@ fn span_matches_conditions(
     store: &TraceStore,
 ) -> bool {
     if conditions.is_empty() {
-        return false;
+        return true; // empty selector `{}` matches all spans
     }
 
     // Evaluate left-to-right with AND binding tighter than OR.
@@ -511,5 +511,16 @@ mod tests {
         let results = evaluate_traceql(&expr, &store);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matched_spans[0].name, "slow_query");
+    }
+
+    #[test]
+    fn test_eval_empty_selector_matches_all() {
+        let store = make_store();
+        let expr = crate::query::traceql::parser::parse_traceql("{}").unwrap();
+        let results = evaluate_traceql(&expr, &store);
+        // Should match both traces (3 total spans across 2 traces)
+        assert_eq!(results.len(), 2);
+        let total_spans: usize = results.iter().map(|r| r.matched_spans.len()).sum();
+        assert_eq!(total_spans, 3);
     }
 }

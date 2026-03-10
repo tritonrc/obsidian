@@ -164,7 +164,11 @@ fn parse_span_selector(input: &str) -> IResult<&str, TraceQLExpr> {
 }
 
 fn parse_conditions(input: &str) -> IResult<&str, (Vec<SpanCondition>, Vec<LogicalOp>)> {
-    let (mut input, first) = parse_condition(input)?;
+    // Handle empty selector: `{}`
+    let (mut input, first) = match parse_condition(input) {
+        Ok((rest, cond)) => (rest, cond),
+        Err(_) => return Ok((input, (Vec::new(), Vec::new()))),
+    };
     let mut conditions = vec![first];
     let mut logical_ops = Vec::new();
 
@@ -523,6 +527,32 @@ mod tests {
                 }
                 _ => panic!("expected Attribute"),
             },
+            _ => panic!("expected SpanSelector"),
+        }
+    }
+
+    #[test]
+    fn test_empty_selector() {
+        let expr = parse_traceql("{}").unwrap();
+        match expr {
+            TraceQLExpr::SpanSelector {
+                conditions,
+                logical_ops,
+            } => {
+                assert!(conditions.is_empty());
+                assert!(logical_ops.is_empty());
+            }
+            _ => panic!("expected SpanSelector"),
+        }
+    }
+
+    #[test]
+    fn test_empty_selector_with_spaces() {
+        let expr = parse_traceql("{  }").unwrap();
+        match expr {
+            TraceQLExpr::SpanSelector { conditions, .. } => {
+                assert!(conditions.is_empty());
+            }
             _ => panic!("expected SpanSelector"),
         }
     }
