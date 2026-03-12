@@ -28,7 +28,7 @@ pub fn make_state() -> obsidian::store::SharedState {
             snapshot_dir: "/tmp/obsidian-test".into(),
             snapshot_interval: 0,
             max_log_entries: 100000,
-            max_samples: 10000,
+            max_series: 10000,
             max_spans: 100000,
             retention: "2h".into(),
             restore: false,

@@ -4,18 +4,31 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::metric::Data;
 use prost::Message;
 
+use super::decode_body;
 use super::label::{extract_resource_labels, promote_service_name};
 use crate::store::SharedState;
 use crate::store::metric_store::Sample;
 
 /// Handler for POST /v1/metrics.
-pub async fn metrics_handler(State(state): State<SharedState>, body: Bytes) -> impl IntoResponse {
+pub async fn metrics_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let body = match decode_body(&headers, &body) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("failed to decode OTLP metrics body: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     let request = match ExportMetricsServiceRequest::decode(body.as_ref()) {
         Ok(r) => r,
         Err(e) => {

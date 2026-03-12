@@ -333,14 +333,13 @@ impl MetricStore {
         }
     }
 
-    /// Evict oldest samples until total_samples <= max.
-    pub fn evict_to_max(&mut self, max_samples: usize) {
-        if self.total_samples <= max_samples {
+    /// Evict oldest series until series count <= max_series.
+    pub fn evict_to_max(&mut self, max_series: usize) {
+        if self.series.len() <= max_series {
             return;
         }
-        let to_remove = self.total_samples - max_samples;
 
-        // Sort series by oldest sample timestamp
+        // Sort series by oldest sample timestamp (oldest first)
         let mut series_ids: Vec<u64> = self.series.keys().copied().collect();
         series_ids.sort_by_key(|id| {
             self.series[id]
@@ -350,45 +349,36 @@ impl MetricStore {
                 .unwrap_or(i64::MAX)
         });
 
-        let mut remaining = to_remove;
-        for sid in series_ids {
-            if remaining == 0 {
-                break;
-            }
-            if let Some(series) = self.series.get_mut(&sid) {
-                let drain = remaining.min(series.samples.len());
-                series.samples.drain(..drain);
-                remaining -= drain;
-                self.total_samples -= drain;
-                if series.samples.is_empty()
-                    && let Some(series) = self.series.remove(&sid)
-                {
-                    // Clean up label_index
-                    for &(k, v) in &series.labels {
-                        if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                            pl.remove(sid);
-                            if pl.is_empty() {
-                                self.label_index.remove(&(k, v));
-                                if let Some(vals) = self.label_values.get_mut(&k) {
-                                    vals.remove(&v);
-                                    if vals.is_empty() {
-                                        self.label_values.remove(&k);
-                                    }
+        let to_remove = self.series.len() - max_series;
+        for sid in series_ids.into_iter().take(to_remove) {
+            if let Some(series) = self.series.remove(&sid) {
+                self.total_samples = self.total_samples.saturating_sub(series.samples.len());
+
+                // Clean up label_index
+                for &(k, v) in &series.labels {
+                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
+                        pl.remove(sid);
+                        if pl.is_empty() {
+                            self.label_index.remove(&(k, v));
+                            if let Some(vals) = self.label_values.get_mut(&k) {
+                                vals.remove(&v);
+                                if vals.is_empty() {
+                                    self.label_values.remove(&k);
                                 }
                             }
                         }
                     }
-                    // Clean up name_index
-                    let name_key = self.interner.get("__name__");
-                    if let Some(name_key) = name_key {
-                        for &(k, v) in &series.labels {
-                            if k == name_key
-                                && let Some(pl) = self.name_index.get_mut(&v)
-                            {
-                                pl.remove(sid);
-                                if pl.is_empty() {
-                                    self.name_index.remove(&v);
-                                }
+                }
+                // Clean up name_index
+                let name_key = self.interner.get("__name__");
+                if let Some(name_key) = name_key {
+                    for &(k, v) in &series.labels {
+                        if k == name_key
+                            && let Some(pl) = self.name_index.get_mut(&v)
+                        {
+                            pl.remove(sid);
+                            if pl.is_empty() {
+                                self.name_index.remove(&v);
                             }
                         }
                     }
@@ -663,29 +653,46 @@ mod tests {
     }
 
     #[test]
-    fn test_evict_to_max() {
+    fn test_evict_to_max_series() {
         let mut store = MetricStore::new();
+        // Create 3 series with different oldest timestamps
         store.ingest_samples(
             "m",
-            vec![],
+            vec![("host".into(), "a".into())],
+            vec![Sample {
+                timestamp_ms: 1000,
+                value: 1.0,
+            }],
+        );
+        store.ingest_samples(
+            "m",
+            vec![("host".into(), "b".into())],
+            vec![Sample {
+                timestamp_ms: 2000,
+                value: 2.0,
+            }],
+        );
+        store.ingest_samples(
+            "m",
+            vec![("host".into(), "c".into())],
             vec![
-                Sample {
-                    timestamp_ms: 1000,
-                    value: 1.0,
-                },
-                Sample {
-                    timestamp_ms: 2000,
-                    value: 2.0,
-                },
                 Sample {
                     timestamp_ms: 3000,
                     value: 3.0,
                 },
+                Sample {
+                    timestamp_ms: 4000,
+                    value: 4.0,
+                },
             ],
         );
-        assert_eq!(store.total_samples, 3);
+        assert_eq!(store.series.len(), 3);
+        assert_eq!(store.total_samples, 4);
+
+        // Evict to max 1 series — should remove the 2 oldest series (a, b)
         store.evict_to_max(1);
-        assert_eq!(store.total_samples, 1);
+        assert_eq!(store.series.len(), 1);
+        assert_eq!(store.total_samples, 2); // only series c remains with 2 samples
     }
 
     #[test]

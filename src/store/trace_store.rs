@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 /// Status of a span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SpanStatus {
     Unset,
     Ok,
@@ -58,6 +58,8 @@ pub struct TraceStore {
     pub service_index: FxHashMap<Spur, FxHashSet<[u8; 16]>>,
     /// Span name (Spur) -> set of trace IDs.
     pub name_index: FxHashMap<Spur, FxHashSet<[u8; 16]>>,
+    /// Span status -> set of trace IDs.
+    pub status_index: FxHashMap<SpanStatus, FxHashSet<[u8; 16]>>,
     /// String interner.
     pub interner: Rodeo,
     /// Total span count for eviction.
@@ -71,6 +73,7 @@ impl TraceStore {
             traces: FxHashMap::default(),
             service_index: FxHashMap::default(),
             name_index: FxHashMap::default(),
+            status_index: FxHashMap::default(),
             interner: Rodeo::default(),
             total_spans: 0,
         }
@@ -88,6 +91,10 @@ impl TraceStore {
                 .or_default()
                 .insert(trace_id);
             self.name_index.entry(name).or_default().insert(trace_id);
+            self.status_index
+                .entry(span.status)
+                .or_default()
+                .insert(trace_id);
 
             self.traces.entry(trace_id).or_default().push(span);
             self.total_spans += 1;
@@ -163,6 +170,9 @@ impl TraceStore {
                     if let Some(set) = self.name_index.get_mut(&span.name) {
                         set.remove(&tid);
                     }
+                    if let Some(set) = self.status_index.get_mut(&span.status) {
+                        set.remove(&tid);
+                    }
                 }
             }
         }
@@ -170,13 +180,19 @@ impl TraceStore {
         // Clean up empty index entries
         self.service_index.retain(|_, v| !v.is_empty());
         self.name_index.retain(|_, v| !v.is_empty());
+        self.status_index.retain(|_, v| !v.is_empty());
     }
 
     /// Evict spans older than the given timestamp.
     pub fn evict_before(&mut self, cutoff_ns: i64) {
-        let mut empty_traces: Vec<([u8; 16], FxHashSet<Spur>, FxHashSet<Spur>)> = Vec::new();
+        let mut empty_traces: Vec<(
+            [u8; 16],
+            FxHashSet<Spur>,
+            FxHashSet<Spur>,
+            FxHashSet<SpanStatus>,
+        )> = Vec::new();
         for (trace_id, spans) in &mut self.traces {
-            // Collect service/name spurs from spans being evicted before retain
+            // Collect service/name spurs and statuses from spans being evicted before retain
             let evicted_services: FxHashSet<Spur> = spans
                 .iter()
                 .filter(|s| s.start_time_ns < cutoff_ns)
@@ -187,17 +203,22 @@ impl TraceStore {
                 .filter(|s| s.start_time_ns < cutoff_ns)
                 .map(|s| s.name)
                 .collect();
+            let evicted_statuses: FxHashSet<SpanStatus> = spans
+                .iter()
+                .filter(|s| s.start_time_ns < cutoff_ns)
+                .map(|s| s.status)
+                .collect();
 
             let before = spans.len();
             spans.retain(|s| s.start_time_ns >= cutoff_ns);
             let removed = before - spans.len();
             self.total_spans = self.total_spans.saturating_sub(removed);
             if spans.is_empty() {
-                empty_traces.push((*trace_id, evicted_services, evicted_names));
+                empty_traces.push((*trace_id, evicted_services, evicted_names, evicted_statuses));
             }
         }
 
-        for (trace_id, services, names) in &empty_traces {
+        for (trace_id, services, names, statuses) in &empty_traces {
             self.traces.remove(trace_id);
             for svc in services {
                 if let Some(set) = self.service_index.get_mut(svc) {
@@ -209,11 +230,17 @@ impl TraceStore {
                     set.remove(trace_id);
                 }
             }
+            for status in statuses {
+                if let Some(set) = self.status_index.get_mut(status) {
+                    set.remove(trace_id);
+                }
+            }
         }
 
         // Clean up empty index entries
         self.service_index.retain(|_, v| !v.is_empty());
         self.name_index.retain(|_, v| !v.is_empty());
+        self.status_index.retain(|_, v| !v.is_empty());
     }
 
     /// Build a TraceResult summary for a trace.

@@ -30,9 +30,9 @@ pub struct Config {
     #[arg(long, default_value = "100000")]
     pub max_log_entries: usize,
 
-    /// Max metric samples before eviction.
+    /// Max metric series before eviction.
     #[arg(long, default_value = "10000")]
-    pub max_samples: usize,
+    pub max_series: usize,
 
     /// Max trace spans before eviction.
     #[arg(long, default_value = "100000")]

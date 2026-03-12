@@ -21,7 +21,7 @@ async fn test_e2e_otlp_to_obsidian() {
             snapshot_dir: "/tmp/obsidian-e2e".into(),
             snapshot_interval: 0,
             max_log_entries: 100_000,
-            max_samples: 10_000,
+            max_series: 10_000,
             max_spans: 100_000,
             retention: "2h".into(),
             restore: false,

@@ -4,19 +4,32 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value;
 use prost::Message;
 use smallvec::SmallVec;
 
+use super::decode_body;
 use super::label::extract_resource_labels;
 use crate::store::SharedState;
 use crate::store::trace_store::{AttributeValue, Span, SpanStatus};
 
 /// Handler for POST /v1/traces.
-pub async fn traces_handler(State(state): State<SharedState>, body: Bytes) -> impl IntoResponse {
+pub async fn traces_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let body = match decode_body(&headers, &body) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("failed to decode OTLP traces body: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     let request = match ExportTraceServiceRequest::decode(body.as_ref()) {
         Ok(r) => r,
         Err(e) => {

@@ -48,7 +48,7 @@ pub fn run_eviction(state: &AppState) {
     {
         let mut metrics = state.metric_store.write();
         metrics.evict_before(cutoff_ms);
-        metrics.evict_to_max(state.config.max_samples);
+        metrics.evict_to_max(state.config.max_series);
     }
     {
         let mut traces = state.trace_store.write();
