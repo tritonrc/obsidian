@@ -43,11 +43,18 @@ pub async fn query(
     };
 
     let now_ns = now_ns();
-    let end_ns = params
-        .time
-        .as_deref()
-        .and_then(parse_timestamp_ns)
-        .unwrap_or(now_ns);
+    let end_ns = match params.time.as_deref() {
+        Some(t) => match parse_timestamp_ns(t) {
+            Some(ns) => ns,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "error": format!("invalid time: {}", t)})),
+                );
+            }
+        },
+        None => now_ns,
+    };
     let start_ns = end_ns - 3_600_000_000_000; // default 1h lookback
 
     let store = state.log_store.read();
@@ -73,21 +80,42 @@ pub async fn query_range(
     };
 
     let now_ns = now_ns();
-    let start_ns = params
-        .start
-        .as_deref()
-        .and_then(parse_timestamp_ns)
-        .unwrap_or(now_ns - 3_600_000_000_000);
-    let end_ns = params
-        .end
-        .as_deref()
-        .and_then(parse_timestamp_ns)
-        .unwrap_or(now_ns);
-    let step_ns = params
-        .step
-        .as_deref()
-        .and_then(|s| crate::config::parse_duration(s).map(|d| d.as_nanos() as i64))
-        .or(Some(60_000_000_000)); // default 1m step
+    let start_ns = match params.start.as_deref() {
+        Some(s) => match parse_timestamp_ns(s) {
+            Some(ns) => ns,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "error": format!("invalid start: {}", s)})),
+                );
+            }
+        },
+        None => now_ns - 3_600_000_000_000,
+    };
+    let end_ns = match params.end.as_deref() {
+        Some(s) => match parse_timestamp_ns(s) {
+            Some(ns) => ns,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "error": format!("invalid end: {}", s)})),
+                );
+            }
+        },
+        None => now_ns,
+    };
+    let step_ns = match params.step.as_deref() {
+        Some(s) => match crate::config::parse_duration(s).map(|d| d.as_nanos() as i64) {
+            Some(ns) => Some(ns),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "error": format!("invalid step: {}", s)})),
+                );
+            }
+        },
+        None => Some(60_000_000_000),
+    };
 
     if step_ns == Some(0) {
         return (

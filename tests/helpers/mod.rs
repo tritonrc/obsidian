@@ -24,6 +24,7 @@ pub fn make_state() -> obsidian::store::SharedState {
         trace_store: RwLock::new(obsidian::store::TraceStore::new()),
         config: obsidian::config::Config {
             port: 0,
+            bind_address: "127.0.0.1".into(),
             snapshot_dir: "/tmp/obsidian-test".into(),
             snapshot_interval: 0,
             max_log_entries: 100000,

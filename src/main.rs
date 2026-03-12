@@ -73,17 +73,7 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(Duration::from_secs(snap_interval));
             loop {
                 interval.tick().await;
-                let ls = snapshot::clone_log_store(&snap_state.log_store.read());
-                let ms = snapshot::clone_metric_store(&snap_state.metric_store.read());
-                let ts = snapshot::clone_trace_store(&snap_state.trace_store.read());
-                match (ls, ms, ts) {
-                    (Ok(ls), Ok(ms), Ok(ts)) => {
-                        if let Err(e) = snapshot::save_snapshot_owned(ls, ms, ts, &snap_dir) {
-                            tracing::error!("snapshot failed: {}", e);
-                        }
-                    }
-                    _ => tracing::error!("snapshot failed: could not clone stores"),
-                }
+                snapshot::save_from_state(&snap_state, &snap_dir);
             }
         });
     }
@@ -100,24 +90,14 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 signal.recv().await;
                 tracing::info!("SIGUSR1 received, saving snapshot");
-                let ls = snapshot::clone_log_store(&sig_state.log_store.read());
-                let ms = snapshot::clone_metric_store(&sig_state.metric_store.read());
-                let ts = snapshot::clone_trace_store(&sig_state.trace_store.read());
-                match (ls, ms, ts) {
-                    (Ok(ls), Ok(ms), Ok(ts)) => {
-                        if let Err(e) = snapshot::save_snapshot_owned(ls, ms, ts, &sig_dir) {
-                            tracing::error!("snapshot failed: {}", e);
-                        }
-                    }
-                    _ => tracing::error!("snapshot failed: could not clone stores"),
-                }
+                snapshot::save_from_state(&sig_state, &sig_dir);
             }
         });
     }
 
     // Build router and start server
     let app = obsidian::server::build_router(state);
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = format!("{}:{}", config.bind_address, config.port);
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!("obsidian listening on {}", addr);
 

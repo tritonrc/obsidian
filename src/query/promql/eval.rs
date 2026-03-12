@@ -410,6 +410,17 @@ fn eval_aggregation(
 
     let op_name = agg.op.to_string();
 
+    // Reject unsupported aggregations
+    match op_name.as_str() {
+        "sum" | "avg" | "max" | "min" | "count" => {}
+        other => {
+            return Err(PromQLError::Unsupported(format!(
+                "aggregation: {}",
+                other
+            )));
+        }
+    }
+
     // Group series by their label set after applying modifier
     let mut groups: BTreeMap<Vec<(String, String)>, Vec<SeriesResult>> = BTreeMap::new();
 
@@ -487,7 +498,7 @@ fn aggregate_group(op: &str, series: &[SeriesResult]) -> Vec<(i64, f64)> {
                 "max" => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
                 "min" => values.iter().cloned().fold(f64::INFINITY, f64::min),
                 "count" => values.len() as f64,
-                _ => values.iter().sum(),
+                _ => unreachable!("unsupported aggregations filtered before reaching here"),
             };
             Some((t, result))
         })

@@ -37,11 +37,18 @@ pub async fn query(
     Query(params): Query<InstantQueryParams>,
 ) -> impl IntoResponse {
     let now_ms = now_ms();
-    let time_ms = params
-        .time
-        .as_deref()
-        .and_then(parse_timestamp_ms)
-        .unwrap_or(now_ms);
+    let time_ms = match params.time.as_deref() {
+        Some(t) => match parse_timestamp_ms(t) {
+            Some(ms) => ms,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid time: {}", t)})),
+                );
+            }
+        },
+        None => now_ms,
+    };
 
     let store = state.metric_store.read();
     match evaluate_instant(&params.query, &store, time_ms) {
@@ -59,21 +66,42 @@ pub async fn query_range(
     Query(params): Query<RangeQueryParams>,
 ) -> impl IntoResponse {
     let now_ms = now_ms();
-    let start_ms = params
-        .start
-        .as_deref()
-        .and_then(parse_timestamp_ms)
-        .unwrap_or(now_ms - 3_600_000);
-    let end_ms = params
-        .end
-        .as_deref()
-        .and_then(parse_timestamp_ms)
-        .unwrap_or(now_ms);
-    let step_ms = params
-        .step
-        .as_deref()
-        .and_then(|s| crate::config::parse_duration(s).map(|d| d.as_millis() as i64))
-        .unwrap_or(60_000); // default 1m
+    let start_ms = match params.start.as_deref() {
+        Some(s) => match parse_timestamp_ms(s) {
+            Some(ms) => ms,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid start: {}", s)})),
+                );
+            }
+        },
+        None => now_ms - 3_600_000,
+    };
+    let end_ms = match params.end.as_deref() {
+        Some(s) => match parse_timestamp_ms(s) {
+            Some(ms) => ms,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid end: {}", s)})),
+                );
+            }
+        },
+        None => now_ms,
+    };
+    let step_ms = match params.step.as_deref() {
+        Some(s) => match crate::config::parse_duration(s).map(|d| d.as_millis() as i64) {
+            Some(ms) => ms,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid step: {}", s)})),
+                );
+            }
+        },
+        None => 60_000,
+    };
 
     if step_ms <= 0 {
         return (
@@ -289,13 +317,24 @@ fn now_ms() -> i64 {
 }
 
 fn parse_timestamp_ms(s: &str) -> Option<i64> {
-    // Try as float seconds (Prometheus convention)
+    // Try as integer first — classify by magnitude
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(classify_to_ms(n));
+    }
+    // Try as float seconds (Prometheus convention: "1700000000.5")
     if let Ok(secs) = s.parse::<f64>() {
         return Some((secs * 1000.0) as i64);
     }
-    // Try as integer milliseconds
-    if let Ok(ms) = s.parse::<i64>() {
-        return Some(ms);
-    }
     None
+}
+
+/// Classify an integer timestamp to milliseconds based on its magnitude.
+fn classify_to_ms(n: i64) -> i64 {
+    if n > 1_000_000_000_000_000 {
+        n / 1_000_000 // nanoseconds -> ms
+    } else if n > 1_000_000_000_000 {
+        n // already milliseconds
+    } else {
+        n * 1000 // seconds -> ms
+    }
 }

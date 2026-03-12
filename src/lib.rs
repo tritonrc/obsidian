@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Obsidian: Lightweight ephemeral observability engine library.
 
 pub mod api;

@@ -92,6 +92,22 @@ pub fn clone_trace_store(store: &TraceStore) -> Result<TraceStore> {
     Ok(bincode::deserialize(&bytes)?)
 }
 
+/// Clone all stores and save a snapshot. Acquires read locks briefly to clone,
+/// then writes to disk without holding any locks.
+pub fn save_from_state(state: &crate::store::AppState, dir: &std::path::Path) {
+    let ls = clone_log_store(&state.log_store.read());
+    let ms = clone_metric_store(&state.metric_store.read());
+    let ts = clone_trace_store(&state.trace_store.read());
+    match (ls, ms, ts) {
+        (Ok(ls), Ok(ms), Ok(ts)) => {
+            if let Err(e) = save_snapshot_owned(ls, ms, ts, dir) {
+                tracing::error!("snapshot failed: {}", e);
+            }
+        }
+        _ => tracing::error!("snapshot failed: could not clone stores"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

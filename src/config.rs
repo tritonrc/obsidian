@@ -10,6 +10,10 @@ use std::time::Duration;
     about = "Lightweight ephemeral observability engine"
 )]
 pub struct Config {
+    /// Bind address for the server.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub bind_address: String,
+
     /// Base port for all API surfaces.
     #[arg(long, default_value = "4320")]
     pub port: u16,

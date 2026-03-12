@@ -17,6 +17,7 @@ async fn test_e2e_otlp_to_obsidian() {
         trace_store: RwLock::new(obsidian::store::TraceStore::new()),
         config: obsidian::config::Config {
             port: 0,
+            bind_address: "127.0.0.1".into(),
             snapshot_dir: "/tmp/obsidian-e2e".into(),
             snapshot_interval: 0,
             max_log_entries: 100_000,

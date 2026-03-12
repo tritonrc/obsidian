@@ -43,6 +43,19 @@ pub async fn status(State(state): State<SharedState>) -> Json<Value> {
         }
     }
 
+    // Approximate memory usage from store sizes
+    let memory_bytes = {
+        let log_store = state.log_store.read();
+        let metric_store = state.metric_store.read();
+        let trace_store = state.trace_store.read();
+
+        // Rough estimate: log entries ~128 bytes each, samples ~16 bytes each, spans ~256 bytes each
+        let log_mem = log_store.total_entries * 128;
+        let metric_mem = metric_store.total_samples * 16;
+        let trace_mem = trace_store.total_spans * 256;
+        log_mem + metric_mem + trace_mem
+    };
+
     Json(json!({
         "status": "success",
         "data": {
@@ -53,6 +66,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<Value> {
             "totalTraces": total_traces,
             "uptimeSeconds": uptime,
             "serviceCount": services.len(),
+            "memoryBytes": memory_bytes,
         }
     }))
 }

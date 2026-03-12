@@ -39,13 +39,32 @@ pub async fn search(
         .iter()
         .map(|r| {
             let trace_id = hex::encode_upper(&r.trace_id);
-            let root = r.matched_spans.first();
+            // Find the actual root span from the trace store, not the first matched span
+            let root_info = store.trace_result(&r.trace_id);
+            let (root_service, root_name, start_ns, duration_ns) = match &root_info {
+                Some(tr) => (
+                    tr.root_service_name.as_str(),
+                    tr.root_span_name.as_str(),
+                    tr.start_time_ns,
+                    tr.duration_ns,
+                ),
+                None => {
+                    // Fallback to first matched span if trace_result unavailable
+                    let first = r.matched_spans.first();
+                    (
+                        first.map(|s| s.service_name.as_str()).unwrap_or(""),
+                        first.map(|s| s.name.as_str()).unwrap_or(""),
+                        first.map(|s| s.start_time_ns).unwrap_or(0),
+                        first.map(|s| s.duration_ns).unwrap_or(0),
+                    )
+                }
+            };
             json!({
                 "traceID": trace_id.to_lowercase(),
-                "rootServiceName": root.map(|s| s.service_name.as_str()).unwrap_or(""),
-                "rootTraceName": root.map(|s| s.name.as_str()).unwrap_or(""),
-                "startTimeUnixNano": root.map(|s| s.start_time_ns).unwrap_or(0).to_string(),
-                "durationMs": root.map(|s| s.duration_ns / 1_000_000).unwrap_or(0),
+                "rootServiceName": root_service,
+                "rootTraceName": root_name,
+                "startTimeUnixNano": start_ns.to_string(),
+                "durationMs": duration_ns / 1_000_000,
                 "spanSets": [{
                     "spans": r.matched_spans.iter().map(|s| {
                         json!({
