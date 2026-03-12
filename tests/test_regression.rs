@@ -404,7 +404,10 @@ async fn test_otlp_traces_gzip_content_encoding() {
         .get_trace(&trace_id)
         .expect("gzip-compressed traces should be ingested");
     assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].status, obsidian::store::trace_store::SpanStatus::Error);
+    assert_eq!(
+        spans[0].status,
+        obsidian::store::trace_store::SpanStatus::Error
+    );
     assert_eq!(store.resolve(&spans[0].name), "charge_card");
 }
 

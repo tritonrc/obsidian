@@ -414,10 +414,7 @@ fn eval_aggregation(
     match op_name.as_str() {
         "sum" | "avg" | "max" | "min" | "count" => {}
         other => {
-            return Err(PromQLError::Unsupported(format!(
-                "aggregation: {}",
-                other
-            )));
+            return Err(PromQLError::Unsupported(format!("aggregation: {}", other)));
         }
     }
 

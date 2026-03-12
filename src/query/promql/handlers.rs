@@ -43,7 +43,9 @@ pub async fn query(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid time: {}", t)})),
+                    Json(
+                        json!({"status": "error", "errorType": "bad_data", "error": format!("invalid time: {}", t)}),
+                    ),
                 );
             }
         },
@@ -72,7 +74,9 @@ pub async fn query_range(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid start: {}", s)})),
+                    Json(
+                        json!({"status": "error", "errorType": "bad_data", "error": format!("invalid start: {}", s)}),
+                    ),
                 );
             }
         },
@@ -84,7 +88,9 @@ pub async fn query_range(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid end: {}", s)})),
+                    Json(
+                        json!({"status": "error", "errorType": "bad_data", "error": format!("invalid end: {}", s)}),
+                    ),
                 );
             }
         },
@@ -96,7 +102,9 @@ pub async fn query_range(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"status": "error", "errorType": "bad_data", "error": format!("invalid step: {}", s)})),
+                    Json(
+                        json!({"status": "error", "errorType": "bad_data", "error": format!("invalid step: {}", s)}),
+                    ),
                 );
             }
         },

@@ -185,12 +185,8 @@ impl TraceStore {
 
     /// Evict spans older than the given timestamp.
     pub fn evict_before(&mut self, cutoff_ns: i64) {
-        let mut empty_traces: Vec<(
-            [u8; 16],
-            FxHashSet<Spur>,
-            FxHashSet<Spur>,
-            FxHashSet<SpanStatus>,
-        )> = Vec::new();
+        type EvictedEntry = ([u8; 16], FxHashSet<Spur>, FxHashSet<Spur>, FxHashSet<SpanStatus>);
+        let mut empty_traces: Vec<EvictedEntry> = Vec::new();
         for (trace_id, spans) in &mut self.traces {
             // Collect service/name spurs and statuses from spans being evicted before retain
             let evicted_services: FxHashSet<Spur> = spans
