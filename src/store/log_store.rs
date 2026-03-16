@@ -404,6 +404,99 @@ impl LogStore {
             }
         }
     }
+
+    /// Clear all data from the store.
+    pub fn clear(&mut self) {
+        self.streams.clear();
+        self.label_index.clear();
+        self.label_values.clear();
+        self.interner = Rodeo::default();
+        self.total_entries = 0;
+    }
+
+    /// Clear all data belonging to a specific service.
+    pub fn clear_service(&mut self, service: &str) {
+        let service_spur = match self.interner.get(service) {
+            Some(s) => s,
+            None => return,
+        };
+        let service_key = match self.interner.get("service") {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Find streams that have service=<value>
+        let stream_ids: Vec<u64> = match self.label_index.get(&(service_key, service_spur)) {
+            Some(pl) => pl.ids().to_vec(),
+            None => return,
+        };
+
+        for stream_id in stream_ids {
+            if let Some(stream) = self.streams.remove(&stream_id) {
+                self.total_entries = self.total_entries.saturating_sub(stream.entries.len());
+                // Clean up label index
+                for &(k, v) in &stream.labels {
+                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
+                        pl.remove(stream_id);
+                        if pl.is_empty() {
+                            self.label_index.remove(&(k, v));
+                            if let Some(vals) = self.label_values.get_mut(&k) {
+                                vals.remove(&v);
+                                if vals.is_empty() {
+                                    self.label_values.remove(&k);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl LogStore {
+    /// Estimate the memory usage of this store in bytes.
+    ///
+    /// Sums actual string lengths in log entries, Vec overhead, label index sizes,
+    /// and the interner's memory footprint.
+    pub fn memory_estimate_bytes(&self) -> usize {
+        let mut bytes = 0usize;
+
+        // Per-stream overhead: SmallVec labels + Vec<LogEntry> bookkeeping
+        for stream in self.streams.values() {
+            // Labels: SmallVec overhead is inline for <=8, each pair is (Spur, Spur) = 8 bytes
+            bytes += stream.labels.len() * std::mem::size_of::<(Spur, Spur)>();
+            // Vec<LogEntry> capacity overhead
+            bytes += stream.entries.capacity() * std::mem::size_of::<LogEntry>();
+            // Actual string data in each entry (heap allocation beyond LogEntry struct)
+            for entry in &stream.entries {
+                bytes += entry.line.capacity();
+            }
+        }
+
+        // HashMap overhead for streams: ~(key_size + value_size + 8) * capacity
+        // Approximate with entries * overhead_per_bucket
+        bytes += self.streams.len()
+            * (std::mem::size_of::<u64>() + std::mem::size_of::<LogStream>() + 8);
+
+        // Label index: FxHashMap<(Spur, Spur), PostingList>
+        for pl in self.label_index.values() {
+            bytes += pl.len() * std::mem::size_of::<u64>();
+        }
+        bytes += self.label_index.len()
+            * (std::mem::size_of::<(Spur, Spur)>() + std::mem::size_of::<PostingList>() + 8);
+
+        // Label values index: FxHashMap<Spur, FxHashSet<Spur>>
+        for vals in self.label_values.values() {
+            bytes += vals.len() * (std::mem::size_of::<Spur>() + 8);
+        }
+        bytes += self.label_values.len() * (std::mem::size_of::<Spur>() + 8);
+
+        // Interner memory
+        bytes += self.interner.current_memory_usage();
+
+        bytes
+    }
 }
 
 impl Default for LogStore {

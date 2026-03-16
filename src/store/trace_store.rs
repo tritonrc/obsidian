@@ -273,6 +273,98 @@ impl TraceStore {
             span_count: spans.len(),
         })
     }
+
+    /// Clear all data from the store.
+    pub fn clear(&mut self) {
+        self.traces.clear();
+        self.service_index.clear();
+        self.name_index.clear();
+        self.status_index.clear();
+        self.interner = Rodeo::default();
+        self.total_spans = 0;
+    }
+
+    /// Clear all data belonging to a specific service.
+    pub fn clear_service(&mut self, service: &str) {
+        let service_spur = match self.interner.get(service) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Get trace IDs for this service
+        let trace_ids: Vec<[u8; 16]> = match self.service_index.get(&service_spur) {
+            Some(set) => set.iter().copied().collect(),
+            None => return,
+        };
+
+        for trace_id in &trace_ids {
+            if let Some(spans) = self.traces.remove(trace_id) {
+                self.total_spans = self.total_spans.saturating_sub(spans.len());
+                // Clean up indexes
+                for span in &spans {
+                    if let Some(set) = self.service_index.get_mut(&span.service_name) {
+                        set.remove(trace_id);
+                    }
+                    if let Some(set) = self.name_index.get_mut(&span.name) {
+                        set.remove(trace_id);
+                    }
+                    if let Some(set) = self.status_index.get_mut(&span.status) {
+                        set.remove(trace_id);
+                    }
+                }
+            }
+        }
+
+        // Clean up empty index entries
+        self.service_index.retain(|_, v| !v.is_empty());
+        self.name_index.retain(|_, v| !v.is_empty());
+        self.status_index.retain(|_, v| !v.is_empty());
+    }
+}
+
+impl TraceStore {
+    /// Estimate the memory usage of this store in bytes.
+    ///
+    /// Accounts for span data, attribute sizes, index overhead, and interner memory.
+    pub fn memory_estimate_bytes(&self) -> usize {
+        let mut bytes = 0usize;
+
+        // Per-trace: Vec<Span> and each span's attributes
+        for spans in self.traces.values() {
+            bytes += spans.capacity() * std::mem::size_of::<Span>();
+            for span in spans {
+                // Attribute key/value pairs stored in SmallVec
+                bytes += span.attributes.len() * std::mem::size_of::<(Spur, AttributeValue)>();
+            }
+        }
+
+        // HashMap overhead for traces
+        bytes += self.traces.len()
+            * (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<Vec<Span>>() + 8);
+
+        // Service index: FxHashMap<Spur, FxHashSet<[u8; 16]>>
+        for set in self.service_index.values() {
+            bytes += set.len() * (std::mem::size_of::<[u8; 16]>() + 8);
+        }
+        bytes += self.service_index.len() * (std::mem::size_of::<Spur>() + 8);
+
+        // Name index: FxHashMap<Spur, FxHashSet<[u8; 16]>>
+        for set in self.name_index.values() {
+            bytes += set.len() * (std::mem::size_of::<[u8; 16]>() + 8);
+        }
+        bytes += self.name_index.len() * (std::mem::size_of::<Spur>() + 8);
+
+        // Status index: FxHashMap<SpanStatus, FxHashSet<[u8; 16]>>
+        for set in self.status_index.values() {
+            bytes += set.len() * (std::mem::size_of::<[u8; 16]>() + 8);
+        }
+        bytes += self.status_index.len() * (std::mem::size_of::<SpanStatus>() + 8);
+
+        // Interner memory
+        bytes += self.interner.current_memory_usage();
+
+        bytes
+    }
 }
 
 impl Default for TraceStore {

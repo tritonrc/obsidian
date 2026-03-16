@@ -1,6 +1,7 @@
 //! Axum handlers for PromQL query endpoints.
 
 use axum::Json;
+use axum::extract::Form;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -10,6 +11,9 @@ use serde_json::{Value, json};
 use super::eval::{PromQLResult, SeriesResult, evaluate_instant, evaluate_range};
 use crate::store::SharedState;
 use crate::store::log_store::{LabelMatchOp, LabelMatcher};
+
+/// Hint included in PromQL parse error responses to help agents construct valid queries.
+const PROMQL_HINT: &str = "Example: rate(http_requests_total[5m])";
 
 #[derive(Debug, Deserialize)]
 pub struct InstantQueryParams {
@@ -36,6 +40,18 @@ pub async fn query(
     State(state): State<SharedState>,
     Query(params): Query<InstantQueryParams>,
 ) -> impl IntoResponse {
+    query_inner(state, params).await
+}
+
+/// POST /api/v1/query
+pub async fn query_post(
+    State(state): State<SharedState>,
+    Form(params): Form<InstantQueryParams>,
+) -> impl IntoResponse {
+    query_inner(state, params).await
+}
+
+async fn query_inner(state: SharedState, params: InstantQueryParams) -> (StatusCode, Json<Value>) {
     let now_ms = now_ms();
     let time_ms = match params.time.as_deref() {
         Some(t) => match parse_timestamp_ms(t) {
@@ -57,7 +73,9 @@ pub async fn query(
         Ok(result) => (StatusCode::OK, Json(format_promql_result(result, time_ms))),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({"status": "error", "errorType": "bad_data", "error": e.to_string()})),
+            Json(
+                json!({"status": "error", "errorType": "bad_data", "error": e.to_string(), "hint": PROMQL_HINT}),
+            ),
         ),
     }
 }
@@ -67,6 +85,21 @@ pub async fn query_range(
     State(state): State<SharedState>,
     Query(params): Query<RangeQueryParams>,
 ) -> impl IntoResponse {
+    query_range_inner(state, params).await
+}
+
+/// POST /api/v1/query_range
+pub async fn query_range_post(
+    State(state): State<SharedState>,
+    Form(params): Form<RangeQueryParams>,
+) -> impl IntoResponse {
+    query_range_inner(state, params).await
+}
+
+async fn query_range_inner(
+    state: SharedState,
+    params: RangeQueryParams,
+) -> (StatusCode, Json<Value>) {
     let now_ms = now_ms();
     let start_ms = match params.start.as_deref() {
         Some(s) => match parse_timestamp_ms(s) {
@@ -125,7 +158,9 @@ pub async fn query_range(
         Ok(result) => (StatusCode::OK, Json(format_range_result(result))),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({"status": "error", "errorType": "bad_data", "error": e.to_string()})),
+            Json(
+                json!({"status": "error", "errorType": "bad_data", "error": e.to_string(), "hint": PROMQL_HINT}),
+            ),
         ),
     }
 }

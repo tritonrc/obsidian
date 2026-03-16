@@ -438,6 +438,115 @@ impl MetricStore {
             }
         }
     }
+
+    /// Clear all data from the store.
+    pub fn clear(&mut self) {
+        self.series.clear();
+        self.name_index.clear();
+        self.label_index.clear();
+        self.label_values.clear();
+        self.interner = Rodeo::default();
+        self.total_samples = 0;
+    }
+
+    /// Clear all data belonging to a specific service.
+    pub fn clear_service(&mut self, service: &str) {
+        let service_spur = match self.interner.get(service) {
+            Some(s) => s,
+            None => return,
+        };
+        let service_key = match self.interner.get("service") {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Find series that have service=<value>
+        let series_ids: Vec<u64> = match self.label_index.get(&(service_key, service_spur)) {
+            Some(pl) => pl.ids().to_vec(),
+            None => return,
+        };
+
+        for series_id in series_ids {
+            if let Some(series) = self.series.remove(&series_id) {
+                self.total_samples = self.total_samples.saturating_sub(series.samples.len());
+                // Clean up label_index and label_values
+                for &(k, v) in &series.labels {
+                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
+                        pl.remove(series_id);
+                        if pl.is_empty() {
+                            self.label_index.remove(&(k, v));
+                            if let Some(vals) = self.label_values.get_mut(&k) {
+                                vals.remove(&v);
+                                if vals.is_empty() {
+                                    self.label_values.remove(&k);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Clean up name_index
+                let name_key = self.interner.get("__name__");
+                if let Some(name_key) = name_key {
+                    for &(k, v) in &series.labels {
+                        if k == name_key
+                            && let Some(pl) = self.name_index.get_mut(&v)
+                        {
+                            pl.remove(series_id);
+                            if pl.is_empty() {
+                                self.name_index.remove(&v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl MetricStore {
+    /// Estimate the memory usage of this store in bytes.
+    ///
+    /// Accounts for series labels, sample data, index overhead, and interner memory.
+    pub fn memory_estimate_bytes(&self) -> usize {
+        let mut bytes = 0usize;
+
+        // Per-series overhead
+        for series in self.series.values() {
+            // Labels: SmallVec of (Spur, Spur) pairs
+            bytes += series.labels.len() * std::mem::size_of::<(Spur, Spur)>();
+            // Samples: Vec<Sample> capacity
+            bytes += series.samples.capacity() * std::mem::size_of::<Sample>();
+        }
+
+        // HashMap overhead for series
+        bytes += self.series.len()
+            * (std::mem::size_of::<u64>() + std::mem::size_of::<MetricSeries>() + 8);
+
+        // Name index: FxHashMap<Spur, PostingList>
+        for pl in self.name_index.values() {
+            bytes += pl.len() * std::mem::size_of::<u64>();
+        }
+        bytes += self.name_index.len()
+            * (std::mem::size_of::<Spur>() + std::mem::size_of::<PostingList>() + 8);
+
+        // Label index: FxHashMap<(Spur, Spur), PostingList>
+        for pl in self.label_index.values() {
+            bytes += pl.len() * std::mem::size_of::<u64>();
+        }
+        bytes += self.label_index.len()
+            * (std::mem::size_of::<(Spur, Spur)>() + std::mem::size_of::<PostingList>() + 8);
+
+        // Label values index
+        for vals in self.label_values.values() {
+            bytes += vals.len() * (std::mem::size_of::<Spur>() + 8);
+        }
+        bytes += self.label_values.len() * (std::mem::size_of::<Spur>() + 8);
+
+        // Interner memory
+        bytes += self.interner.current_memory_usage();
+
+        bytes
+    }
 }
 
 impl Default for MetricStore {

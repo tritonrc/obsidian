@@ -2,6 +2,7 @@
 //!
 //! Decodes `ExportTraceServiceRequest` protobuf and stores spans.
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -9,14 +10,18 @@ use axum::response::IntoResponse;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value;
 use prost::Message;
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
-use super::decode_body;
 use super::label::extract_resource_labels;
+use super::{decode_body, is_json_content_type};
 use crate::store::SharedState;
 use crate::store::trace_store::{AttributeValue, Span, SpanStatus};
 
 /// Handler for POST /v1/traces.
+///
+/// Accepts both protobuf (`application/x-protobuf`, default) and JSON
+/// (`application/json`) encoded `ExportTraceServiceRequest` bodies.
 pub async fn traces_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -26,19 +31,31 @@ pub async fn traces_handler(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("failed to decode OTLP traces body: {}", e);
-            return StatusCode::BAD_REQUEST;
+            return StatusCode::BAD_REQUEST.into_response();
         }
     };
 
-    let request = match ExportTraceServiceRequest::decode(body.as_ref()) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("failed to decode OTLP traces: {}", e);
-            return StatusCode::BAD_REQUEST;
+    let request = if is_json_content_type(&headers) {
+        match serde_json::from_slice::<ExportTraceServiceRequest>(body.as_ref()) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("failed to decode OTLP traces JSON: {}", e);
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+        }
+    } else {
+        match ExportTraceServiceRequest::decode(body.as_ref()) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("failed to decode OTLP traces: {}", e);
+                return StatusCode::BAD_REQUEST.into_response();
+            }
         }
     };
 
     let mut store = state.trace_store.write();
+    let mut trace_ids = FxHashSet::default();
+    let mut total_spans: usize = 0;
 
     for resource_spans in &request.resource_spans {
         let resource_labels = extract_resource_labels(&resource_spans.resource);
@@ -120,6 +137,7 @@ pub async fn traces_handler(
                     }
                 }
 
+                trace_ids.insert(trace_id);
                 spans.push(Span {
                     trace_id,
                     span_id,
@@ -133,11 +151,18 @@ pub async fn traces_handler(
                 });
             }
 
+            total_spans += spans.len();
             store.ingest_spans(spans);
         }
     }
 
-    StatusCode::NO_CONTENT
+    Json(serde_json::json!({
+        "accepted": {
+            "traces": trace_ids.len(),
+            "spans": total_spans,
+        }
+    }))
+    .into_response()
 }
 
 fn convert_any_value(

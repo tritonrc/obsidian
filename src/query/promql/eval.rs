@@ -5,13 +5,25 @@ use std::collections::BTreeMap;
 use promql_parser::label::{MatchOp as PromMatchOp, Matchers};
 use promql_parser::parser::{
     self, AggregateExpr, BinaryExpr, Call, Expr, LabelModifier, MatrixSelector, NumberLiteral,
-    ParenExpr, UnaryExpr, VectorSelector,
+    Offset, ParenExpr, StringLiteral, UnaryExpr, VectorSelector,
 };
+use regex::Regex;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 use crate::store::log_store::{LabelMatchOp, LabelMatcher};
 use crate::store::metric_store::{MetricStore, Sample};
+
+/// Convert an optional `Offset` to a signed millisecond value.
+/// `Pos` offsets shift the lookup window into the past (positive ms to subtract),
+/// `Neg` offsets shift forward (negative ms to subtract).
+fn offset_to_ms(offset: &Option<Offset>) -> i64 {
+    match offset {
+        Some(Offset::Pos(dur)) => dur.as_millis() as i64,
+        Some(Offset::Neg(dur)) => -(dur.as_millis() as i64),
+        None => 0,
+    }
+}
 
 /// PromQL evaluation errors.
 #[derive(Debug, Error)]
@@ -134,14 +146,16 @@ fn eval_vector_selector(
         });
     }
     let series_ids = store.select_series(&matchers);
+    let offset_ms = offset_to_ms(&vs.offset);
 
     let mut results = Vec::new();
 
     if instant || step_ms == 0 {
         // Instant query: find latest sample for each series at or before end_ms
         let lookback_ms = 5 * 60 * 1000; // 5-minute lookback
+        let effective_end = end_ms - offset_ms;
         for sid in &series_ids {
-            let samples = store.get_samples(*sid, end_ms - lookback_ms, end_ms);
+            let samples = store.get_samples(*sid, effective_end - lookback_ms, effective_end);
             if let Some(last) = samples.last() {
                 let labels = store.get_series_labels(*sid).unwrap_or_default();
                 results.push(SeriesResult {
@@ -159,7 +173,8 @@ fn eval_vector_selector(
             let mut series_samples = Vec::new();
             let mut t = start_ms;
             while t <= end_ms {
-                let samples = store.get_samples(*sid, t - lookback_ms, t);
+                let effective_t = t - offset_ms;
+                let samples = store.get_samples(*sid, effective_t - lookback_ms, effective_t);
                 if let Some(last) = samples.last() {
                     series_samples.push((t, last.value));
                 }
@@ -196,11 +211,13 @@ fn eval_matrix_selector(
     }
     let series_ids = store.select_series(&matchers);
     let range_ms = ms.range.as_millis() as i64;
+    let offset_ms = offset_to_ms(&vs.offset);
+    let effective_end = end_ms - offset_ms;
 
     let mut results = Vec::new();
     for sid in &series_ids {
         let labels = store.get_series_labels(*sid).unwrap_or_default();
-        let samples = store.get_samples(*sid, end_ms - range_ms, end_ms);
+        let samples = store.get_samples(*sid, effective_end - range_ms, effective_end);
         let sample_tuples: Vec<(i64, f64)> =
             samples.iter().map(|s| (s.timestamp_ms, s.value)).collect();
         if !sample_tuples.is_empty() {
@@ -281,6 +298,8 @@ fn eval_call(
             )?;
             apply_scalar_func(func_name, inner)
         }
+        "label_replace" => eval_label_replace(call, store, start_ms, end_ms, step_ms, instant),
+        "label_join" => eval_label_join(call, store, start_ms, end_ms, step_ms, instant),
         _ => Err(PromQLError::Unsupported(format!("function: {}", func_name))),
     }
 }
@@ -315,13 +334,15 @@ fn eval_rate_like(
         });
     }
     let series_ids = store.select_series(&matchers);
+    let offset_ms = offset_to_ms(&vs.offset);
 
     let mut results = Vec::new();
 
     if instant || step_ms == 0 {
+        let effective_end = end_ms - offset_ms;
         for sid in &series_ids {
             let labels = store.get_series_labels(*sid).unwrap_or_default();
-            let samples = store.get_samples(*sid, end_ms - range_ms, end_ms);
+            let samples = store.get_samples(*sid, effective_end - range_ms, effective_end);
             let value = compute_rate_like(func_name, samples, range_ms);
             if let Some(v) = value {
                 results.push(SeriesResult {
@@ -337,7 +358,8 @@ fn eval_rate_like(
             let mut series_samples = Vec::new();
             let mut t = start_ms;
             while t <= end_ms {
-                let samples = store.get_samples(*sid, t - range_ms, t);
+                let effective_t = t - offset_ms;
+                let samples = store.get_samples(*sid, effective_t - range_ms, effective_t);
                 if let Some(v) = compute_rate_like(func_name, samples, range_ms) {
                     series_samples.push((t, v));
                 }
@@ -410,8 +432,45 @@ fn eval_aggregation(
 
     let op_name = agg.op.to_string();
 
-    // Reject unsupported aggregations
+    // Handle topk/bottomk separately — they select top/bottom k series rather than aggregating
     match op_name.as_str() {
+        "topk" | "bottomk" => {
+            let k = match &agg.param {
+                Some(param_expr) => {
+                    match eval_expr(param_expr, store, start_ms, end_ms, step_ms, instant)? {
+                        PromQLResult::Scalar(v) => v as usize,
+                        _ => {
+                            return Err(PromQLError::Eval(
+                                "topk/bottomk parameter must be a scalar".into(),
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    return Err(PromQLError::Eval(
+                        "topk/bottomk requires a parameter k".into(),
+                    ));
+                }
+            };
+
+            // Sort series by their latest sample value
+            let mut sorted_series = series;
+            sorted_series.sort_by(|a, b| {
+                let a_val = a.samples.last().map(|(_, v)| *v).unwrap_or(f64::NAN);
+                let b_val = b.samples.last().map(|(_, v)| *v).unwrap_or(f64::NAN);
+                if op_name == "topk" {
+                    b_val
+                        .partial_cmp(&a_val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    a_val
+                        .partial_cmp(&b_val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            });
+            sorted_series.truncate(k);
+            return Ok(PromQLResult::InstantVector(sorted_series));
+        }
         "sum" | "avg" | "max" | "min" | "count" => {}
         other => {
             return Err(PromQLError::Unsupported(format!("aggregation: {}", other)));
@@ -823,6 +882,163 @@ fn apply_scalar_func(func_name: &str, result: PromQLResult) -> Result<PromQLResu
     }
 }
 
+/// Extract a string literal value from an expression.
+fn extract_string_arg(expr: &Expr) -> Result<&str, PromQLError> {
+    match expr {
+        Expr::StringLiteral(StringLiteral { val, .. }) => Ok(val.as_str()),
+        _ => Err(PromQLError::Eval("expected string literal argument".into())),
+    }
+}
+
+/// Evaluate `label_replace(v, dst_label, replacement, src_label, regex)`.
+///
+/// For each series in the inner vector, if the value of `src_label` matches the
+/// full regex, set `dst_label` to `replacement` with `$1`-style capture group
+/// substitution. If the regex does not match, the series is returned unchanged.
+fn eval_label_replace(
+    call: &Call,
+    store: &MetricStore,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+    instant: bool,
+) -> Result<PromQLResult, PromQLError> {
+    if call.args.args.len() < 5 {
+        return Err(PromQLError::Eval(
+            "label_replace requires 5 arguments".into(),
+        ));
+    }
+    let inner = eval_expr(
+        &call.args.args[0],
+        store,
+        start_ms,
+        end_ms,
+        step_ms,
+        instant,
+    )?;
+    let dst_label = extract_string_arg(&call.args.args[1])?;
+    let replacement = extract_string_arg(&call.args.args[2])?;
+    let src_label = extract_string_arg(&call.args.args[3])?;
+    let regex_str = extract_string_arg(&call.args.args[4])?;
+
+    // Anchor the regex to match the full source label value (Prometheus semantics).
+    let anchored = format!("^(?:{})$", regex_str);
+    let re = Regex::new(&anchored).map_err(|e| PromQLError::Eval(format!("bad regex: {}", e)))?;
+
+    let series = match inner {
+        PromQLResult::InstantVector(s) => s,
+        PromQLResult::RangeVector(s) => s,
+        other => return Ok(other),
+    };
+
+    let results: Vec<SeriesResult> = series
+        .into_iter()
+        .map(|mut sr| {
+            let src_value = sr
+                .labels
+                .iter()
+                .find(|(k, _)| k == src_label)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+
+            if let Some(caps) = re.captures(&src_value) {
+                // Build replacement string: substitute $1, $2, etc.
+                let mut new_value = replacement.to_string();
+                for i in (1..caps.len()).rev() {
+                    let group_val = caps.get(i).map(|m| m.as_str()).unwrap_or("");
+                    new_value = new_value.replace(&format!("${}", i), group_val);
+                }
+
+                if new_value.is_empty() {
+                    // Empty replacement removes the label
+                    sr.labels.retain(|(k, _)| k != dst_label);
+                } else {
+                    // Set or replace dst_label
+                    if let Some(existing) = sr.labels.iter_mut().find(|(k, _)| k == dst_label) {
+                        existing.1 = new_value;
+                    } else {
+                        sr.labels.push((dst_label.to_string(), new_value));
+                        sr.labels.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
+                }
+            }
+            sr
+        })
+        .collect();
+
+    Ok(PromQLResult::InstantVector(results))
+}
+
+/// Evaluate `label_join(v, dst_label, separator, src_label1, src_label2, ...)`.
+///
+/// Concatenates the values of the source labels using the separator and stores
+/// the result in `dst_label`.
+fn eval_label_join(
+    call: &Call,
+    store: &MetricStore,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+    instant: bool,
+) -> Result<PromQLResult, PromQLError> {
+    if call.args.args.len() < 4 {
+        return Err(PromQLError::Eval(
+            "label_join requires at least 4 arguments".into(),
+        ));
+    }
+    let inner = eval_expr(
+        &call.args.args[0],
+        store,
+        start_ms,
+        end_ms,
+        step_ms,
+        instant,
+    )?;
+    let dst_label = extract_string_arg(&call.args.args[1])?;
+    let separator = extract_string_arg(&call.args.args[2])?;
+
+    let src_labels: Vec<&str> = call.args.args[3..]
+        .iter()
+        .map(|e| extract_string_arg(e))
+        .collect::<Result<_, _>>()?;
+
+    let series = match inner {
+        PromQLResult::InstantVector(s) => s,
+        PromQLResult::RangeVector(s) => s,
+        other => return Ok(other),
+    };
+
+    let results: Vec<SeriesResult> = series
+        .into_iter()
+        .map(|mut sr| {
+            let parts: Vec<String> = src_labels
+                .iter()
+                .map(|&src| {
+                    sr.labels
+                        .iter()
+                        .find(|(k, _)| k == src)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+
+            let joined = parts.join(separator);
+
+            if joined.is_empty() {
+                sr.labels.retain(|(k, _)| k != dst_label);
+            } else if let Some(existing) = sr.labels.iter_mut().find(|(k, _)| k == dst_label) {
+                existing.1 = joined;
+            } else {
+                sr.labels.push((dst_label.to_string(), joined));
+                sr.labels.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            sr
+        })
+        .collect();
+
+    Ok(PromQLResult::InstantVector(results))
+}
+
 fn convert_matchers(matchers: &Matchers) -> Vec<LabelMatcher> {
     matchers
         .matchers
@@ -981,6 +1197,147 @@ mod tests {
         match result {
             PromQLResult::Scalar(v) => assert_eq!(v, 42.0),
             _ => panic!("expected Scalar"),
+        }
+    }
+
+    #[test]
+    fn task_18_label_replace_basic() {
+        let store = make_store();
+        // Replace method label into a new label called "verb"
+        let result = evaluate_instant(
+            r#"label_replace(http_requests_total{method="GET"}, "verb", "$1", "method", "(.*)")"#,
+            &store,
+            9000,
+        )
+        .unwrap();
+        match result {
+            PromQLResult::InstantVector(series) => {
+                assert_eq!(series.len(), 1);
+                let verb = series[0]
+                    .labels
+                    .iter()
+                    .find(|(k, _)| k == "verb")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(verb, Some("GET"));
+            }
+            _ => panic!("expected InstantVector"),
+        }
+    }
+
+    #[test]
+    fn task_18_label_replace_no_match() {
+        let store = make_store();
+        // Regex doesn't match -> series returned unchanged
+        let result = evaluate_instant(
+            r#"label_replace(http_requests_total{method="GET"}, "verb", "$1", "method", "NOMATCH")"#,
+            &store,
+            9000,
+        )
+        .unwrap();
+        match result {
+            PromQLResult::InstantVector(series) => {
+                assert_eq!(series.len(), 1);
+                // "verb" label should not exist
+                let verb = series[0].labels.iter().find(|(k, _)| k == "verb");
+                assert!(verb.is_none());
+            }
+            _ => panic!("expected InstantVector"),
+        }
+    }
+
+    #[test]
+    fn task_18_label_replace_capture_group() {
+        let store = make_store();
+        // Extract first 3 chars via capture group
+        let result = evaluate_instant(
+            r#"label_replace(http_requests_total{method="POST"}, "short", "$1", "method", "(...).*")"#,
+            &store,
+            9000,
+        )
+        .unwrap();
+        match result {
+            PromQLResult::InstantVector(series) => {
+                assert_eq!(series.len(), 1);
+                let short = series[0]
+                    .labels
+                    .iter()
+                    .find(|(k, _)| k == "short")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(short, Some("POS"));
+            }
+            _ => panic!("expected InstantVector"),
+        }
+    }
+
+    #[test]
+    fn task_18_label_join_basic() {
+        let store = make_store();
+        // Join method and service with "-"
+        let result = evaluate_instant(
+            r#"label_join(http_requests_total{method="GET"}, "combined", "-", "method", "service")"#,
+            &store,
+            9000,
+        )
+        .unwrap();
+        match result {
+            PromQLResult::InstantVector(series) => {
+                assert_eq!(series.len(), 1);
+                let combined = series[0]
+                    .labels
+                    .iter()
+                    .find(|(k, _)| k == "combined")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(combined, Some("GET-api"));
+            }
+            _ => panic!("expected InstantVector"),
+        }
+    }
+
+    #[test]
+    fn task_18_label_join_single_source() {
+        let store = make_store();
+        // Join with single source label
+        let result = evaluate_instant(
+            r#"label_join(http_requests_total{method="GET"}, "copy", "", "method")"#,
+            &store,
+            9000,
+        )
+        .unwrap();
+        match result {
+            PromQLResult::InstantVector(series) => {
+                assert_eq!(series.len(), 1);
+                let copy = series[0]
+                    .labels
+                    .iter()
+                    .find(|(k, _)| k == "copy")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(copy, Some("GET"));
+            }
+            _ => panic!("expected InstantVector"),
+        }
+    }
+
+    #[test]
+    fn task_18_label_replace_static_replacement() {
+        let store = make_store();
+        // Static replacement (no capture groups)
+        let result = evaluate_instant(
+            r#"label_replace(http_requests_total{method="GET"}, "env", "production", "method", ".*")"#,
+            &store,
+            9000,
+        )
+        .unwrap();
+        match result {
+            PromQLResult::InstantVector(series) => {
+                assert_eq!(series.len(), 1);
+                let env = series[0]
+                    .labels
+                    .iter()
+                    .find(|(k, _)| k == "env")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(env, Some("production"));
+            }
+            _ => panic!("expected InstantVector"),
         }
     }
 }

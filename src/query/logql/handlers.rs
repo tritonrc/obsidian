@@ -1,6 +1,7 @@
 //! Axum handlers for LogQL query endpoints.
 
 use axum::Json;
+use axum::extract::Form;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -10,6 +11,9 @@ use serde_json::{Value, json};
 use super::eval::{LogQLResult, evaluate_logql};
 use super::parser::parse_logql;
 use crate::store::SharedState;
+
+/// Hint included in LogQL parse error responses to help agents construct valid queries.
+const LOGQL_HINT: &str = "Example: {service=\"myapp\"} |= \"error\"";
 
 #[derive(Debug, Deserialize)]
 pub struct QueryParams {
@@ -32,20 +36,36 @@ pub async fn query(
     State(state): State<SharedState>,
     Query(params): Query<QueryParams>,
 ) -> impl IntoResponse {
+    query_inner(state, params).await
+}
+
+/// POST /loki/api/v1/query
+pub async fn query_post(
+    State(state): State<SharedState>,
+    Form(params): Form<QueryParams>,
+) -> impl IntoResponse {
+    query_inner(state, params).await
+}
+
+async fn query_inner(state: SharedState, params: QueryParams) -> (StatusCode, Json<Value>) {
     let expr = match parse_logql(&params.query) {
         Ok(e) => e,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"status": "error", "error": e.to_string()})),
+                Json(json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                    "hint": LOGQL_HINT,
+                })),
             );
         }
     };
 
     let now_ns = now_ns();
-    let end_ns = match params.time.as_deref() {
+    let (start_ns, end_ns) = match params.time.as_deref() {
         Some(t) => match parse_timestamp_ns(t) {
-            Some(ns) => ns,
+            Some(ns) => (ns - 3_600_000_000_000, ns), // 1h lookback from specified time
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -53,9 +73,8 @@ pub async fn query(
                 );
             }
         },
-        None => now_ns,
+        None => (0, now_ns), // No time specified: search all data
     };
-    let start_ns = end_ns - 3_600_000_000_000; // default 1h lookback
 
     let store = state.log_store.read();
     let result = evaluate_logql(&expr, &store, start_ns, end_ns, None);
@@ -69,12 +88,31 @@ pub async fn query_range(
     State(state): State<SharedState>,
     Query(params): Query<QueryRangeParams>,
 ) -> impl IntoResponse {
+    query_range_inner(state, params).await
+}
+
+/// POST /loki/api/v1/query_range
+pub async fn query_range_post(
+    State(state): State<SharedState>,
+    Form(params): Form<QueryRangeParams>,
+) -> impl IntoResponse {
+    query_range_inner(state, params).await
+}
+
+async fn query_range_inner(
+    state: SharedState,
+    params: QueryRangeParams,
+) -> (StatusCode, Json<Value>) {
     let expr = match parse_logql(&params.query) {
         Ok(e) => e,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"status": "error", "error": e.to_string()})),
+                Json(json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                    "hint": LOGQL_HINT,
+                })),
             );
         }
     };

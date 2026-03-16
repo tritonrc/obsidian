@@ -35,6 +35,18 @@ pub enum TraceQLExpr {
         lhs: Box<TraceQLExpr>,
         rhs: Box<TraceQLExpr>,
     },
+    /// Pipeline with aggregate filter: `{...} | count() > N`.
+    Pipeline {
+        inner: Box<TraceQLExpr>,
+        pipeline_stages: Vec<PipelineStage>,
+    },
+}
+
+/// A pipeline stage applied after span matching.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PipelineStage {
+    /// `count() op value` — filter traces by the number of matched spans.
+    CountFilter { op: CompareOp, value: u64 },
 }
 
 /// Structural operators between span selectors.
@@ -112,9 +124,19 @@ pub fn parse_traceql(input: &str) -> Result<TraceQLExpr, TraceQLParseError> {
     let input = input.trim();
     match parse_top_level(input) {
         Ok((remaining, expr)) => {
+            // Try to parse pipeline stages from remaining input
+            let remaining = remaining.trim();
+            let (remaining, stages) = parse_pipeline_stages(remaining);
             let remaining = remaining.trim();
             if remaining.is_empty() {
-                Ok(expr)
+                if stages.is_empty() {
+                    Ok(expr)
+                } else {
+                    Ok(TraceQLExpr::Pipeline {
+                        inner: Box::new(expr),
+                        pipeline_stages: stages,
+                    })
+                }
             } else {
                 Err(TraceQLParseError::Parse(format!(
                     "unexpected trailing input: {}",
@@ -382,6 +404,40 @@ fn parse_duration_value(input: &str) -> IResult<&str, Duration> {
     Ok((input, duration))
 }
 
+/// Parse zero or more pipeline stages from the remaining input after the base expression.
+/// Each stage is `| count() op value`.
+fn parse_pipeline_stages(mut input: &str) -> (&str, Vec<PipelineStage>) {
+    let mut stages = Vec::new();
+    loop {
+        let trimmed = input.trim_start();
+        if !trimmed.starts_with('|') {
+            break;
+        }
+        let rest = trimmed[1..].trim_start();
+        match parse_count_filter(rest) {
+            Ok((remaining, stage)) => {
+                stages.push(stage);
+                input = remaining;
+            }
+            Err(_) => break,
+        }
+    }
+    (input, stages)
+}
+
+/// Parse `count() op value` where op is a comparison and value is a u64.
+fn parse_count_filter(input: &str) -> IResult<&str, PipelineStage> {
+    let (input, _) = tag("count()")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, op) = parse_compare_op(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, num_str) = take_while1(|c: char| c.is_ascii_digit())(input)?;
+    let value: u64 = num_str.parse().map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
+    })?;
+    Ok((input, PipelineStage::CountFilter { op, value }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +627,66 @@ mod tests {
                 _ => panic!("expected Duration"),
             },
             _ => panic!("expected SpanSelector"),
+        }
+    }
+
+    #[test]
+    fn test_count_filter_gt() {
+        let expr = parse_traceql(r#"{ status = error } | count() > 2"#).unwrap();
+        match expr {
+            TraceQLExpr::Pipeline {
+                inner,
+                pipeline_stages,
+            } => {
+                assert!(matches!(*inner, TraceQLExpr::SpanSelector { .. }));
+                assert_eq!(pipeline_stages.len(), 1);
+                assert_eq!(
+                    pipeline_stages[0],
+                    PipelineStage::CountFilter {
+                        op: CompareOp::Gt,
+                        value: 2
+                    }
+                );
+            }
+            _ => panic!("expected Pipeline"),
+        }
+    }
+
+    #[test]
+    fn test_count_filter_gte() {
+        let expr = parse_traceql(r#"{} | count() >= 3"#).unwrap();
+        match expr {
+            TraceQLExpr::Pipeline {
+                pipeline_stages, ..
+            } => {
+                assert_eq!(
+                    pipeline_stages[0],
+                    PipelineStage::CountFilter {
+                        op: CompareOp::Gte,
+                        value: 3
+                    }
+                );
+            }
+            _ => panic!("expected Pipeline"),
+        }
+    }
+
+    #[test]
+    fn test_count_filter_eq() {
+        let expr = parse_traceql(r#"{ status = ok } | count() = 1"#).unwrap();
+        match expr {
+            TraceQLExpr::Pipeline {
+                pipeline_stages, ..
+            } => {
+                assert_eq!(
+                    pipeline_stages[0],
+                    PipelineStage::CountFilter {
+                        op: CompareOp::Eq,
+                        value: 1
+                    }
+                );
+            }
+            _ => panic!("expected Pipeline"),
         }
     }
 }

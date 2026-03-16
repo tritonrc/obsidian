@@ -96,12 +96,45 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build router and start server
-    let app = obsidian::server::build_router(state);
+    let app = obsidian::server::build_router(state.clone());
     let addr = format!("{}:{}", config.bind_address, config.port);
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!("obsidian listening on {}", addr);
 
-    axum::serve(listener, app).await?;
+    // Graceful shutdown: wait for SIGTERM (or ctrl-c), save snapshot, then exit
+    let shutdown_state = state.clone();
+    let shutdown_snap_dir = PathBuf::from(&config.snapshot_dir);
+    let shutdown_signal = async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {
+                    tracing::info!("SIGINT received, shutting down");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("SIGTERM received, shutting down");
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+            tracing::info!("ctrl-c received, shutting down");
+        }
+
+        tracing::info!("saving shutdown snapshot");
+        snapshot::save_from_state(&shutdown_state, &shutdown_snap_dir);
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
 
     Ok(())
 }

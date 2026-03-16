@@ -71,8 +71,8 @@ async fn test_invalid_trace_id_skipped() {
         .unwrap();
 
     let resp = app.clone().oneshot(r).await.unwrap();
-    // Should still return NO_CONTENT (request accepted, invalid spans skipped)
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    // Should still return OK (request accepted, invalid spans skipped)
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify no spans were ingested
     let store = state.trace_store.read();
@@ -97,7 +97,7 @@ async fn test_invalid_span_id_skipped() {
         .unwrap();
 
     let resp = app.clone().oneshot(r).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     let store = state.trace_store.read();
     assert_eq!(store.total_spans, 0);
@@ -119,7 +119,7 @@ async fn test_all_zero_trace_id_skipped() {
         .body(Body::from(req.encode_to_vec()))
         .unwrap();
     let resp = app.clone().oneshot(r).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     let store = state.trace_store.read();
     assert_eq!(store.total_spans, 0);

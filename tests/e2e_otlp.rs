@@ -51,7 +51,7 @@ async fn test_e2e_otlp_to_obsidian() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204);
+    assert_eq!(resp.status(), 200);
 
     // Ingest traces
     let resp = client
@@ -72,13 +72,13 @@ async fn test_e2e_otlp_to_obsidian() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204);
+    assert_eq!(resp.status(), 200);
 
     // Ingest logs
     let resp = client.post(format!("{}/loki/api/v1/push", base))
         .json(&json!({"streams": [{"stream": {"service": svc}, "values": [[now_ns.to_string(), "e2e log"]]}]}))
         .send().await.unwrap();
-    assert_eq!(resp.status(), 204);
+    assert_eq!(resp.status(), 200);
 
     // PromQL
     let json: Value = client

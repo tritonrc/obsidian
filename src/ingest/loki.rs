@@ -2,6 +2,7 @@
 //!
 //! Accepts JSON and protobuf+snappy encoded log pushes.
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -65,39 +66,42 @@ pub async fn push_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json");
 
-    if content_type.contains("application/x-protobuf")
+    let request = if content_type.contains("application/x-protobuf")
         || content_type.contains("application/x-snappy")
     {
         // Snappy-compressed JSON path
         match decode_snappy_json(&body) {
-            Ok(request) => {
-                ingest_loki_push(&state, request);
-                StatusCode::NO_CONTENT
-            }
+            Ok(r) => r,
             Err(e) => {
                 tracing::warn!("failed to decode protobuf push: {}", e);
-                StatusCode::BAD_REQUEST
+                return StatusCode::BAD_REQUEST.into_response();
             }
         }
     } else {
         // JSON path
         match serde_json::from_slice::<LokiPushRequest>(&body) {
-            Ok(request) => {
-                ingest_loki_push(&state, request);
-                StatusCode::NO_CONTENT
-            }
+            Ok(r) => r,
             Err(e) => {
                 tracing::warn!("failed to parse Loki push JSON: {}", e);
-                StatusCode::BAD_REQUEST
+                return StatusCode::BAD_REQUEST.into_response();
             }
         }
-    }
+    };
+
+    let (streams, entries) = ingest_loki_push(&state, request);
+    Json(serde_json::json!({
+        "accepted": {
+            "streams": streams,
+            "entries": entries,
+        }
+    }))
+    .into_response()
 }
 
 /// Decompress snappy body and parse as JSON.
 ///
 /// Loki's native protobuf push format uses its own proto definitions (not OTLP).
-/// We don't implement that — this path only handles snappy-compressed JSON.
+/// We don't implement that -- this path only handles snappy-compressed JSON.
 fn decode_snappy_json(body: &[u8]) -> Result<LokiPushRequest, anyhow::Error> {
     let decompressed = snap::raw::Decoder::new()
         .decompress_vec(body)
@@ -107,7 +111,8 @@ fn decode_snappy_json(body: &[u8]) -> Result<LokiPushRequest, anyhow::Error> {
         .map_err(|e| anyhow::anyhow!("failed to parse decompressed push: {}", e))
 }
 
-fn ingest_loki_push(state: &SharedState, request: LokiPushRequest) {
+/// Ingest a Loki push request. Returns `(stream_count, entry_count)`.
+fn ingest_loki_push(state: &SharedState, request: LokiPushRequest) -> (usize, usize) {
     type StreamData = (Vec<(String, String)>, Vec<LogEntry>);
     let prepared: Vec<StreamData> = request
         .streams
@@ -136,8 +141,13 @@ fn ingest_loki_push(state: &SharedState, request: LokiPushRequest) {
         })
         .collect();
 
+    let stream_count = prepared.len();
+    let entry_count: usize = prepared.iter().map(|(_, entries)| entries.len()).sum();
+
     let mut store = state.log_store.write();
     for (labels, entries) in prepared {
         store.ingest_stream(labels, entries);
     }
+
+    (stream_count, entry_count)
 }

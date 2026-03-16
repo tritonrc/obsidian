@@ -66,6 +66,13 @@ pub enum PipelineStage {
     LineNotContains(String),     // != "text"
     LineRegex(String, Regex),    // |~ "regex"
     LineNotRegex(String, Regex), // !~ "regex"
+    JsonExtract,                 // | json
+    LabelFilter {
+        // | key="value"
+        key: String,
+        op: MatchOp,
+        value: String,
+    },
 }
 
 /// Metric functions over log streams.
@@ -248,8 +255,47 @@ fn parse_pipeline_stage(input: &str) -> IResult<&str, PipelineStage> {
         parse_line_not_contains,
         parse_line_regex,
         parse_line_not_regex,
+        parse_json_or_label_filter,
     ))
     .parse(input)
+}
+
+fn parse_json_or_label_filter(input: &str) -> IResult<&str, PipelineStage> {
+    let (input, _) = char('|').parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+
+    // Try "json" keyword
+    if let Ok((rest, _)) = tag::<&str, &str, nom::error::Error<&str>>("json").parse_complete(input)
+    {
+        // Make sure "json" is not part of a longer identifier
+        let next = rest.chars().next();
+        if next.is_none() || (!next.unwrap().is_alphanumeric() && next.unwrap() != '_') {
+            return Ok((rest, PipelineStage::JsonExtract));
+        }
+    }
+
+    // Otherwise parse label filter: key op "value"
+    let (input, key) =
+        nom::bytes::take_while1(|c: char| c.is_alphanumeric() || c == '_').parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, op) = alt((
+        map(tag("=~"), |_| MatchOp::Regex),
+        map(tag("!~"), |_| MatchOp::NotRegex),
+        map(tag("!="), |_| MatchOp::Neq),
+        map(tag("="), |_| MatchOp::Eq),
+    ))
+    .parse_complete(input)?;
+    let (input, _) = multispace0().parse_complete(input)?;
+    let (input, value) = parse_quoted_string(input)?;
+
+    Ok((
+        input,
+        PipelineStage::LabelFilter {
+            key: key.to_string(),
+            op,
+            value,
+        },
+    ))
 }
 
 fn parse_line_contains(input: &str) -> IResult<&str, PipelineStage> {

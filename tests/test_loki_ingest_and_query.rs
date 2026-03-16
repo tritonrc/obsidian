@@ -32,7 +32,7 @@ async fn test_loki_push_and_logql_query() {
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     let req = Request::builder()
         .method("GET")

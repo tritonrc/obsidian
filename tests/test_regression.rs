@@ -45,12 +45,7 @@ fn test_promql_unsupported_aggregation_errors() {
         }],
     );
 
-    for query in &[
-        r#"group(up)"#,
-        r#"count_values("val", up)"#,
-        r#"topk(3, up)"#,
-        r#"bottomk(3, up)"#,
-    ] {
+    for query in &[r#"group(up)"#, r#"count_values("val", up)"#] {
         let result = evaluate_instant(query, &store, 1000);
         assert!(
             result.is_err(),
@@ -360,7 +355,7 @@ async fn test_otlp_metrics_gzip_content_encoding() {
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     let store = state.metric_store.read();
     assert_eq!(store.series.len(), 1, "expected one ingested metric series");
@@ -397,7 +392,7 @@ async fn test_otlp_traces_gzip_content_encoding() {
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     let store = state.trace_store.read();
     let spans = store

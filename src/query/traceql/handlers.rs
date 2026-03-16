@@ -12,9 +12,16 @@ use super::parser::parse_traceql;
 use crate::store::SharedState;
 use crate::store::trace_store::SpanStatus;
 
+/// Hint included in TraceQL parse error responses to help agents construct valid queries.
+const TRACEQL_HINT: &str = "Example: { resource.service.name = \"myapp\" && status = error }";
+
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {
-    pub q: String,
+    pub q: Option<String>,
+    /// Optional start time filter (epoch seconds).
+    pub start: Option<u64>,
+    /// Optional end time filter (epoch seconds).
+    pub end: Option<u64>,
 }
 
 /// GET /api/search
@@ -22,18 +29,42 @@ pub async fn search(
     State(state): State<SharedState>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
-    let expr = match parse_traceql(&params.q) {
+    // If no query is provided (or it's empty), return empty traces array.
+    // Grafana calls /api/search without a query on datasource setup.
+    let q = params.q.unwrap_or_default();
+    if q.is_empty() {
+        return (StatusCode::OK, Json(json!({"traces": []})));
+    }
+
+    let expr = match parse_traceql(&q) {
         Ok(e) => e,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": e.to_string()})),
+                Json(json!({"error": e.to_string(), "hint": TRACEQL_HINT})),
             );
         }
     };
 
     let store = state.trace_store.read();
     let results = evaluate_traceql(&expr, &store);
+
+    // Convert start/end from epoch seconds to nanoseconds for filtering.
+    let start_ns = params.start.map(|s| s as i64 * 1_000_000_000);
+    let end_ns = params.end.map(|e| e as i64 * 1_000_000_000);
+
+    // Filter traces: keep only those with at least one span whose start_time_unix_nano
+    // falls within [start_ns, end_ns].
+    let results: Vec<_> = results
+        .into_iter()
+        .filter(|r| {
+            r.matched_spans.iter().any(|s| {
+                let after_start = start_ns.is_none_or(|st| s.start_time_ns >= st);
+                let before_end = end_ns.is_none_or(|en| s.start_time_ns <= en);
+                after_start && before_end
+            })
+        })
+        .collect();
 
     let traces: Vec<Value> = results
         .iter()
@@ -112,61 +143,74 @@ pub async fn get_trace(
     let store = state.trace_store.read();
     match store.get_trace(&trace_id) {
         Some(spans) => {
-            let span_values: Vec<Value> = spans
-                .iter()
-                .map(|span| {
-                    let attrs: Vec<Value> = span
-                        .attributes
-                        .iter()
-                        .map(|(k, v)| {
-                            json!({
-                                "key": store.resolve(k),
-                                "value": {
-                                    "stringValue": store.resolve_attribute_value(v),
-                                }
-                            })
-                        })
-                        .collect();
+            // Group spans by service_name, preserving insertion order via Vec
+            let mut service_order: Vec<String> = Vec::new();
+            let mut service_spans: std::collections::HashMap<String, Vec<Value>> =
+                std::collections::HashMap::new();
 
-                    json!({
-                        "traceId": hex_encode(&span.trace_id),
-                        "spanId": hex_encode(&span.span_id),
-                        "parentSpanId": span.parent_span_id.as_ref().map(|p| hex_encode(p)).unwrap_or_default(),
-                        "name": store.resolve(&span.name),
-                        "kind": 1,
-                        "startTimeUnixNano": span.start_time_ns.to_string(),
-                        "endTimeUnixNano": (span.start_time_ns + span.duration_ns).to_string(),
-                        "status": {
-                            "code": match span.status {
-                                SpanStatus::Unset => 0,
-                                SpanStatus::Ok => 1,
-                                SpanStatus::Error => 2,
+            for span in spans {
+                let service_name = store.resolve(&span.service_name).to_string();
+                let attrs: Vec<Value> = span
+                    .attributes
+                    .iter()
+                    .map(|(k, v)| {
+                        json!({
+                            "key": store.resolve(k),
+                            "value": {
+                                "stringValue": store.resolve_attribute_value(v),
                             }
+                        })
+                    })
+                    .collect();
+
+                let span_value = json!({
+                    "traceId": hex_encode(&span.trace_id),
+                    "spanId": hex_encode(&span.span_id),
+                    "parentSpanId": span.parent_span_id.as_ref().map(|p| hex_encode(p)).unwrap_or_default(),
+                    "name": store.resolve(&span.name),
+                    "kind": 1,
+                    "startTimeUnixNano": span.start_time_ns.to_string(),
+                    "endTimeUnixNano": (span.start_time_ns + span.duration_ns).to_string(),
+                    "status": {
+                        "code": match span.status {
+                            SpanStatus::Unset => 0,
+                            SpanStatus::Ok => 1,
+                            SpanStatus::Error => 2,
+                        }
+                    },
+                    "attributes": attrs,
+                });
+
+                if !service_spans.contains_key(&service_name) {
+                    service_order.push(service_name.clone());
+                }
+                service_spans
+                    .entry(service_name)
+                    .or_default()
+                    .push(span_value);
+            }
+
+            let batches: Vec<Value> = service_order
+                .iter()
+                .map(|svc| {
+                    json!({
+                        "resource": {
+                            "attributes": [{
+                                "key": "service.name",
+                                "value": {"stringValue": svc}
+                            }]
                         },
-                        "attributes": attrs,
+                        "scopeSpans": [{
+                            "spans": service_spans.get(svc).unwrap_or(&Vec::new()),
+                        }]
                     })
                 })
                 .collect();
 
-            let service_name = spans
-                .first()
-                .map(|s| store.resolve(&s.service_name).to_string())
-                .unwrap_or_default();
-
             (
                 StatusCode::OK,
                 Json(json!({
-                    "batches": [{
-                        "resource": {
-                            "attributes": [{
-                                "key": "service.name",
-                                "value": {"stringValue": service_name}
-                            }]
-                        },
-                        "scopeSpans": [{
-                            "spans": span_values,
-                        }]
-                    }]
+                    "batches": batches
                 })),
             )
         }

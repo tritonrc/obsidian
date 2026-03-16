@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use rustc_hash::FxHashMap;
+
 use crate::store::log_store::{LabelMatchOp, LabelMatcher, LogStore};
 
 use super::parser::{LogQLExpr, MatchOp, MetricFunc, PipelineStage};
@@ -162,6 +164,7 @@ fn extract_selector_and_stages(
 }
 
 fn apply_stages(line: &str, stages: &[PipelineStage]) -> bool {
+    let mut extracted: FxHashMap<String, String> = FxHashMap::default();
     for stage in stages {
         match stage {
             PipelineStage::LineContains(pattern) => {
@@ -181,6 +184,40 @@ fn apply_stages(line: &str, stages: &[PipelineStage]) -> bool {
             }
             PipelineStage::LineNotRegex(_, re) => {
                 if re.is_match(line) {
+                    return false;
+                }
+            }
+            PipelineStage::JsonExtract => {
+                let parsed: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => return false, // drop lines that fail JSON parsing
+                };
+                if let serde_json::Value::Object(map) = parsed {
+                    for (k, v) in map {
+                        let val_str = match &v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        extracted.insert(k, val_str);
+                    }
+                }
+            }
+            PipelineStage::LabelFilter { key, op, value } => {
+                let label_val = match extracted.get(key.as_str()) {
+                    Some(v) => v.as_str(),
+                    None => return false, // label not found => filter fails
+                };
+                let matches = match op {
+                    MatchOp::Eq => label_val == value,
+                    MatchOp::Neq => label_val != value,
+                    MatchOp::Regex => regex::Regex::new(value)
+                        .map(|re| re.is_match(label_val))
+                        .unwrap_or(false),
+                    MatchOp::NotRegex => regex::Regex::new(value)
+                        .map(|re| !re.is_match(label_val))
+                        .unwrap_or(false),
+                };
+                if !matches {
                     return false;
                 }
             }

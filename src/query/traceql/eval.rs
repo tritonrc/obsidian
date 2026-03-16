@@ -5,8 +5,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::store::trace_store::{AttributeValue, Span, SpanStatus, TraceStore};
 
 use super::parser::{
-    AttrScope, CompareOp, LogicalOp, SpanCondition, SpanStatusValue, SpanValue, StructuralOp,
-    TraceQLExpr,
+    AttrScope, CompareOp, LogicalOp, PipelineStage, SpanCondition, SpanStatusValue, SpanValue,
+    StructuralOp, TraceQLExpr,
 };
 
 /// Result of a TraceQL evaluation.
@@ -36,6 +36,37 @@ pub fn evaluate_traceql(expr: &TraceQLExpr, store: &TraceStore) -> Vec<TraceResu
             logical_ops,
         } => eval_span_selector(conditions, logical_ops, store),
         TraceQLExpr::Structural { op, lhs, rhs } => eval_structural(op, lhs, rhs, store),
+        TraceQLExpr::Pipeline {
+            inner,
+            pipeline_stages,
+        } => {
+            let mut results = evaluate_traceql(inner, store);
+            for stage in pipeline_stages {
+                results = apply_pipeline_stage(results, stage);
+            }
+            results
+        }
+    }
+}
+
+/// Apply a pipeline stage to filter trace results.
+fn apply_pipeline_stage(results: Vec<TraceResult>, stage: &PipelineStage) -> Vec<TraceResult> {
+    match stage {
+        PipelineStage::CountFilter { op, value } => results
+            .into_iter()
+            .filter(|r| {
+                let count = r.matched_spans.len() as u64;
+                match op {
+                    CompareOp::Eq => count == *value,
+                    CompareOp::Neq => count != *value,
+                    CompareOp::Gt => count > *value,
+                    CompareOp::Lt => count < *value,
+                    CompareOp::Gte => count >= *value,
+                    CompareOp::Lte => count <= *value,
+                    CompareOp::Regex => false,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -522,5 +553,60 @@ mod tests {
         assert_eq!(results.len(), 2);
         let total_spans: usize = results.iter().map(|r| r.matched_spans.len()).sum();
         assert_eq!(total_spans, 3);
+    }
+
+    #[test]
+    fn test_eval_count_filter_gt() {
+        let store = make_store();
+        // {} matches all spans: trace1 has 2 spans, trace2 has 1 span
+        // count() > 1 should only keep trace1
+        let expr = crate::query::traceql::parser::parse_traceql("{} | count() > 1").unwrap();
+        let results = evaluate_traceql(&expr, &store);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matched_spans.len(), 2);
+    }
+
+    #[test]
+    fn test_eval_count_filter_eq() {
+        let store = make_store();
+        // count() = 1 should only keep trace2 (1 span)
+        let expr = crate::query::traceql::parser::parse_traceql("{} | count() = 1").unwrap();
+        let results = evaluate_traceql(&expr, &store);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matched_spans.len(), 1);
+        assert_eq!(results[0].matched_spans[0].name, "slow_query");
+    }
+
+    #[test]
+    fn test_eval_count_filter_gte() {
+        let store = make_store();
+        // count() >= 2 should only keep trace1
+        let expr = crate::query::traceql::parser::parse_traceql("{} | count() >= 2").unwrap();
+        let results = evaluate_traceql(&expr, &store);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matched_spans.len(), 2);
+    }
+
+    #[test]
+    fn test_eval_count_filter_with_conditions() {
+        let store = make_store();
+        // Match payments spans, then filter by count
+        // Trace1 has 1 payments span, trace2 has 1 payments span
+        // count() >= 1 keeps both
+        let expr = crate::query::traceql::parser::parse_traceql(
+            r#"{ resource.service.name = "payments" } | count() >= 1"#,
+        )
+        .unwrap();
+        let results = evaluate_traceql(&expr, &store);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_eval_count_filter_excludes_all() {
+        let store = make_store();
+        // No trace has more than 2 matching spans
+        let expr = crate::query::traceql::parser::parse_traceql("{} | count() > 10").unwrap();
+        let results = evaluate_traceql(&expr, &store);
+        assert!(results.is_empty());
     }
 }
