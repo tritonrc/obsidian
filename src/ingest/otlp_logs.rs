@@ -10,8 +10,8 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value;
 use prost::Message;
 
-use super::decode_body;
 use super::label::{extract_resource_labels, promote_service_name};
+use super::{decode_body, is_json_content_type};
 use crate::store::SharedState;
 use crate::store::log_store::LogEntry;
 
@@ -29,11 +29,21 @@ pub async fn logs_handler(
         }
     };
 
-    let request = match ExportLogsServiceRequest::decode(body.as_ref()) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("failed to decode OTLP logs: {}", e);
-            return StatusCode::BAD_REQUEST;
+    let request = if is_json_content_type(&headers) {
+        match serde_json::from_slice::<ExportLogsServiceRequest>(body.as_ref()) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("failed to decode OTLP logs JSON: {}", e);
+                return StatusCode::BAD_REQUEST;
+            }
+        }
+    } else {
+        match ExportLogsServiceRequest::decode(body.as_ref()) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("failed to decode OTLP logs: {}", e);
+                return StatusCode::BAD_REQUEST;
+            }
         }
     };
 
