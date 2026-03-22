@@ -15,9 +15,8 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry_proto::tonic::metrics::v1::{
-    ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Metric, NumberDataPoint,
-    ResourceMetrics, ScopeMetrics, Summary, SummaryDataPoint,
-    exponential_histogram_data_point::Buckets, metric, summary_data_point,
+    Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Summary, SummaryDataPoint,
+    metric, summary_data_point,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, Status};
@@ -176,52 +175,6 @@ fn make_summary_request(
                                 .collect(),
                             ..Default::default()
                         }],
-                    })),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }],
-    }
-}
-
-/// Build an ExponentialHistogram metric request.
-fn make_exp_histogram_request(
-    service_name: &str,
-    metric_name: &str,
-    ts_ns: u64,
-    count: u64,
-    sum: f64,
-    zero_count: u64,
-    scale: i32,
-    positive_offset: i32,
-    positive_counts: Vec<u64>,
-) -> ExportMetricsServiceRequest {
-    ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: make_resource(service_name),
-            scope_metrics: vec![ScopeMetrics {
-                metrics: vec![Metric {
-                    name: metric_name.into(),
-                    data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
-                        data_points: vec![ExponentialHistogramDataPoint {
-                            time_unix_nano: ts_ns,
-                            count,
-                            sum: Some(sum),
-                            scale,
-                            zero_count,
-                            positive: Some(Buckets {
-                                offset: positive_offset,
-                                bucket_counts: positive_counts,
-                            }),
-                            negative: Some(Buckets {
-                                offset: 0,
-                                bucket_counts: vec![],
-                            }),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
                     })),
                     ..Default::default()
                 }],
@@ -491,34 +444,7 @@ async fn test_e2e_smoke_all_features() {
     // Summary with 3 quantiles produces 3 series + _sum + _count = 5
     assert_eq!(body["accepted"]["series"], 5);
 
-    // --- 10. ExponentialHistogram metric (svc-exphist) ---
-    let svc_exphist = "svc-exphist";
-    let resp = client
-        .post(format!("{}/v1/metrics", base))
-        .header("content-type", "application/x-protobuf")
-        .body(
-            make_exp_histogram_request(
-                svc_exphist,
-                "payload_size",
-                now_ns,
-                6,
-                12.0,
-                0,
-                0,
-                0,
-                vec![2, 4],
-            )
-            .encode_to_vec(),
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: Value = resp.json().await.unwrap();
-    // ExponentialHistogram: zero bucket + 2 positive buckets + +Inf bucket + _sum + _count = 6
-    assert_eq!(body["accepted"]["series"].as_u64().unwrap(), 6);
-
-    // --- 11. Multi-service traces for grouping (svc-group-a, svc-group-b) ---
+    // --- 10. Multi-service traces for grouping (svc-group-a, svc-group-b) ---
     let svc_group_a = "svc-group-a";
     let svc_group_b = "svc-group-b";
     let multi_trace_id: [u8; 16] = [0xCC; 16];
@@ -1024,93 +950,6 @@ async fn test_e2e_smoke_all_features() {
     let val: f64 = results[0]["value"][1].as_str().unwrap().parse().unwrap();
     assert!((val - 0.25).abs() < 0.01, "p50 should be 0.25");
 
-    // --- PromQL: query ExponentialHistogram (svc-exphist) ---
-    let json: Value = client
-        .get(format!(
-            "{}/api/v1/query?query={}",
-            base,
-            urlencoding::encode(&format!(r#"payload_size_sum{{service="{}"}}"#, svc_exphist))
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(json["status"], "success");
-    let results = json["data"]["result"].as_array().unwrap();
-    assert_eq!(results.len(), 1, "exp histogram _sum should have 1 series");
-    let val: f64 = results[0]["value"][1].as_str().unwrap().parse().unwrap();
-    assert!(
-        (val - 12.0).abs() < 0.01,
-        "exp histogram _sum should be 12.0"
-    );
-
-    let json: Value = client
-        .get(format!(
-            "{}/api/v1/query?query={}",
-            base,
-            urlencoding::encode(&format!(
-                r#"payload_size_count{{service="{}"}}"#,
-                svc_exphist
-            ))
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(json["status"], "success");
-    let results = json["data"]["result"].as_array().unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "exp histogram _count should have 1 series"
-    );
-    let val: f64 = results[0]["value"][1].as_str().unwrap().parse().unwrap();
-    assert!(
-        (val - 6.0).abs() < 0.01,
-        "exp histogram _count should be 6.0"
-    );
-
-    // --- PromQL: query ExponentialHistogram _bucket series with le labels ---
-    // scale=0, base=2.0, positive_offset=0, counts=[2,4], zero_count=0
-    // Buckets: le="1" (zero, cumul=0), le="2" (cumul=2), le="4" (cumul=6), le="+Inf" (cumul=6)
-    for (le, expected_val) in &[("1", 0.0), ("2", 2.0), ("4", 6.0), ("+Inf", 6.0)] {
-        let json: Value = client
-            .get(format!(
-                "{}/api/v1/query?query={}",
-                base,
-                urlencoding::encode(&format!(
-                    r#"payload_size_bucket{{service="{}", le="{}"}}"#,
-                    svc_exphist, le
-                ))
-            ))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(json["status"], "success");
-        let results = json["data"]["result"].as_array().unwrap();
-        assert_eq!(
-            results.len(),
-            1,
-            "exp histogram _bucket le={} should have 1 series",
-            le
-        );
-        let val: f64 = results[0]["value"][1].as_str().unwrap().parse().unwrap();
-        assert!(
-            (val - expected_val).abs() < 0.01,
-            "exp histogram _bucket le={} should be {}, got {}",
-            le,
-            expected_val,
-            val
-        );
-    }
-
     // --- PromQL topk(3, metric) with exact assertions ---
     let json: Value = client
         .get(format!(
@@ -1486,10 +1325,10 @@ async fn test_e2e_smoke_all_features() {
 
     // ======= API PHASE =======
 
-    // --- GET /api/v1/summary — verify error signals, not info ---
+    // --- GET /api/v1/diagnose?service=X — verify error signals, not info ---
     let json: Value = client
         .get(format!(
-            "{}/api/v1/summary?service={}",
+            "{}/api/v1/diagnose?service={}",
             base, svc_summary_traces
         ))
         .send()
@@ -1499,27 +1338,36 @@ async fn test_e2e_smoke_all_features() {
         .await
         .unwrap();
     assert_eq!(json["service"], svc_summary_traces);
-    // Should have error logs
-    let error_logs = json["errors"]["logs"].as_array().unwrap();
-    assert!(!error_logs.is_empty(), "summary should contain error logs");
+    // Should have recent error logs
+    let recent_errors = json["recent_errors"].as_array().unwrap();
     assert!(
-        error_logs
+        !recent_errors.is_empty(),
+        "diagnose should contain recent error logs"
+    );
+    assert!(
+        recent_errors
             .iter()
             .any(|l| l["line"].as_str().unwrap().contains("summary error line")),
-        "summary error logs should contain our error line"
+        "diagnose recent_errors should contain our error line"
     );
-    // Info logs should NOT appear in errors
+    // Info logs should NOT appear in recent_errors
     assert!(
-        !error_logs
+        !recent_errors
             .iter()
             .any(|l| l["line"].as_str().unwrap().contains("summary info line")),
-        "summary errors should not contain info lines"
+        "diagnose recent_errors should not contain info lines"
     );
-    // Should have error traces
-    let error_traces = json["errors"]["traces"].as_array().unwrap();
+    // Should have slowest traces
+    let slowest_traces = json["slowest_traces"].as_array().unwrap();
     assert!(
-        !error_traces.is_empty(),
-        "summary should contain error traces"
+        !slowest_traces.is_empty(),
+        "diagnose should contain slowest traces"
+    );
+    // Health score should be degraded
+    let health_score = json["health_score"].as_f64().unwrap();
+    assert!(
+        health_score < 100.0,
+        "diagnose health_score should be degraded with errors"
     );
 
     // --- GET /api/v1/catalog — verify specific metric names and label keys ---

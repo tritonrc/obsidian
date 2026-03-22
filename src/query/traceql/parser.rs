@@ -47,6 +47,12 @@ pub enum TraceQLExpr {
 pub enum PipelineStage {
     /// `count() op value` — filter traces by the number of matched spans.
     CountFilter { op: CompareOp, value: u64 },
+    /// `avg(duration) op value` — filter traces by average span duration.
+    AvgDuration { op: CompareOp, value_ns: i64 },
+    /// `max(duration) op value` — filter traces by maximum span duration.
+    MaxDuration { op: CompareOp, value_ns: i64 },
+    /// `min(duration) op value` — filter traces by minimum span duration.
+    MinDuration { op: CompareOp, value_ns: i64 },
 }
 
 /// Structural operators between span selectors.
@@ -405,7 +411,7 @@ fn parse_duration_value(input: &str) -> IResult<&str, Duration> {
 }
 
 /// Parse zero or more pipeline stages from the remaining input after the base expression.
-/// Each stage is `| count() op value`.
+/// Each stage is `| count() op value` or `| avg/max/min(duration) op duration_value`.
 fn parse_pipeline_stages(mut input: &str) -> (&str, Vec<PipelineStage>) {
     let mut stages = Vec::new();
     loop {
@@ -414,12 +420,14 @@ fn parse_pipeline_stages(mut input: &str) -> (&str, Vec<PipelineStage>) {
             break;
         }
         let rest = trimmed[1..].trim_start();
-        match parse_count_filter(rest) {
-            Ok((remaining, stage)) => {
-                stages.push(stage);
-                input = remaining;
-            }
-            Err(_) => break,
+        if let Ok((remaining, stage)) = parse_count_filter(rest) {
+            stages.push(stage);
+            input = remaining;
+        } else if let Ok((remaining, stage)) = parse_duration_agg_filter(rest) {
+            stages.push(stage);
+            input = remaining;
+        } else {
+            break;
         }
     }
     (input, stages)
@@ -436,6 +444,24 @@ fn parse_count_filter(input: &str) -> IResult<&str, PipelineStage> {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
     })?;
     Ok((input, PipelineStage::CountFilter { op, value }))
+}
+
+/// Parse `avg(duration) op duration`, `max(duration) op duration`, or `min(duration) op duration`.
+fn parse_duration_agg_filter(input: &str) -> IResult<&str, PipelineStage> {
+    let (input, agg_fn) = alt((tag("avg"), tag("max"), tag("min"))).parse_complete(input)?;
+    let (input, _) = tag("(duration)")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, op) = parse_compare_op(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, dur) = parse_duration_value(input)?;
+    let value_ns = dur.as_nanos() as i64;
+    let stage = match agg_fn {
+        "avg" => PipelineStage::AvgDuration { op, value_ns },
+        "max" => PipelineStage::MaxDuration { op, value_ns },
+        "min" => PipelineStage::MinDuration { op, value_ns },
+        _ => unreachable!(),
+    };
+    Ok((input, stage))
 }
 
 #[cfg(test)]

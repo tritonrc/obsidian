@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Obsidian is a lightweight, ephemeral observability engine: a single Rust binary exposing LogQL, PromQL, and TraceQL query surfaces over in-memory stores. It receives telemetry from Vector via Loki push API and OTLP/HTTP, and is designed to be booted per git worktree for agent-driven development workflows.
+Obsidian is a lightweight, ephemeral observability engine: a single Rust binary exposing LogQL, PromQL, and TraceQL query surfaces over in-memory stores. It receives telemetry via Loki push API, OTLP/HTTP, and Prometheus remote write — services send directly to Obsidian. It is designed to be booted per git worktree for agent-driven development workflows.
 
 Read `DESIGN.md` for the full technical specification before making changes.
 
@@ -39,6 +39,7 @@ Follow this layout strictly:
 ```
 src/
 ├── main.rs              # CLI parsing, server startup, signal handling
+├── lib.rs               # Public module re-exports
 ├── server.rs            # Axum router setup, shared state, middleware
 ├── config.rs            # CLI args → Config struct via clap
 ├── store/
@@ -46,19 +47,20 @@ src/
 │   ├── log_store.rs     # LogStore, LogStream, LogEntry
 │   ├── metric_store.rs  # MetricStore, MetricSeries, Sample
 │   ├── trace_store.rs   # TraceStore, Span, SpanStatus, AttributeValue
-│   ├── posting_list.rs  # PostingList with sorted insert, merge intersect/union
-│   └── interner.rs      # Thin wrapper over lasso::Rodeo if needed
+│   └── posting_list.rs  # PostingList with sorted insert, merge intersect/union
 ├── ingest/
 │   ├── mod.rs
 │   ├── loki.rs          # POST /loki/api/v1/push — JSON and protobuf+snappy
+│   ├── otlp_logs.rs     # POST /v1/logs — OTLP protobuf log decoding
 │   ├── otlp_metrics.rs  # POST /v1/metrics — OTLP protobuf decoding
 │   ├── otlp_traces.rs   # POST /v1/traces — OTLP protobuf decoding
+│   ├── remote_write.rs  # POST /api/v1/write — Prometheus remote write (snappy+protobuf)
 │   └── label.rs         # Service label promotion, resource attr extraction
 ├── query/
 │   ├── mod.rs
 │   ├── logql/
 │   │   ├── mod.rs
-│   │   ├── parser.rs    # nom parser for LogQL (or wrapper around logql crate)
+│   │   ├── parser.rs    # nom parser for LogQL
 │   │   ├── eval.rs      # LogQL evaluator against LogStore
 │   │   └── handlers.rs  # Axum handlers for /loki/api/v1/*
 │   ├── promql/
@@ -73,9 +75,15 @@ src/
 ├── snapshot.rs          # Bincode serialize/deserialize, SIGUSR1 handler
 └── api/
     ├── mod.rs
+    ├── catalog.rs       # GET /api/v1/catalog — per-service metric/label catalog
+    ├── diagnose.rs      # GET /api/v1/diagnose — health assessment per service
+    ├── health.rs        # GET /ready
+    ├── metadata.rs      # GET /api/v1/metadata — Grafana Prometheus datasource compat
+    ├── openapi.rs       # GET /api/v1/openapi — OpenAPI 3.0 spec
+    ├── reset.rs         # POST /api/v1/reset — store reset
     ├── services.rs      # GET /api/v1/services
     ├── status.rs        # GET /api/v1/status
-    └── health.rs        # GET /ready
+    └── summary.rs       # GET /api/v1/summary — unified error summary across signals
 ```
 
 ### Naming
@@ -185,17 +193,17 @@ Pin these exact versions in `Cargo.toml` to avoid surprises:
 
 ```toml
 [dependencies]
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
 lasso = { version = "0.7", features = ["serialize"] }
-promql-parser = "0.4"
-opentelemetry-proto = { version = "0.27", features = ["gen-tonic-messages"] }
-prost = "0.13"
-nom = "7"
+promql-parser = "0.8"
+opentelemetry-proto = { version = "0.31", features = ["gen-tonic-messages", "with-serde"] }
+prost = "0.14"
+nom = "8"
 regex = "1"
 bincode = "1"
 snap = "1"
@@ -206,6 +214,9 @@ thiserror = "2"
 anyhow = "1"
 rustc-hash = "2"
 smallvec = { version = "1", features = ["serde"] }
+bytes = "1"
+http = "1"
+tower-http = { version = "0.6", features = ["cors"] }
 
 [profile.release]
 lto = true
@@ -213,7 +224,7 @@ codegen-units = 1
 strip = true
 ```
 
-If `opentelemetry-proto` or `promql-parser` versions have breaking changes, check their changelogs and adapt. The feature flags above are critical — `gen-tonic-messages` on `opentelemetry-proto` generates the message types we need without pulling in full gRPC server/client code; `serialize` on `lasso` enables bincode snapshot support.
+If `opentelemetry-proto` or `promql-parser` versions have breaking changes, check their changelogs and adapt. The feature flags above are critical — `gen-tonic-messages` on `opentelemetry-proto` generates the message types we need without pulling in full gRPC server/client code; `with-serde` enables serde support on OTLP types; `serialize` on `lasso` enables bincode snapshot support; `cors` on `tower-http` enables CORS middleware for cross-origin access.
 
 ---
 

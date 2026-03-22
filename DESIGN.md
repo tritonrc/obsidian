@@ -2,7 +2,7 @@
 
 ## Overview
 
-A single Rust binary exposing three API surfaces — LogQL, PromQL, and TraceQL — designed for ephemeral, per-worktree observability. A single Obsidian instance serves all services in a worktree (e.g. API gateway, payments engine, worker processes). Services are distinguished by labels (`service`, `resource.service.name`) and queryable independently or in aggregate. Receives telemetry from Vector (logs via Loki push API, metrics and traces via OTLP/HTTP), stores everything in-memory with optional snapshot-to-disk, and supports the 80/20 subset of each query language that agents need to reason about runtime behavior.
+A single Rust binary exposing three API surfaces — LogQL, PromQL, and TraceQL — designed for ephemeral, per-worktree observability. A single Obsidian instance serves all services in a worktree (e.g. API gateway, payments engine, worker processes). Services are distinguished by labels (`service`, `resource.service.name`) and queryable independently or in aggregate. Services send telemetry directly to Obsidian via OTLP/HTTP (metrics, traces, logs) and Loki push API (logs). Everything is stored in-memory with optional snapshot-to-disk. Obsidian supports the 80/20 subset of each query language that agents need to reason about runtime behavior.
 
 The name "Obsidian" is a placeholder — dark, glassy, reflects everything clearly.
 
@@ -15,32 +15,30 @@ The name "Obsidian" is a placeholder — dark, glassy, reflects everything clear
                     │ api-gateway  │  │  payments-   │  │    risk-     │
                     │              │  │  engine       │  │  evaluator   │
                     └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
-                           │ OTLP            │ OTLP            │ OTLP
+                           │ OTLP/HTTP       │ OTLP/HTTP       │ OTLP/HTTP
                            └────────┬────────┘                 │
                                     │         ┌────────────────┘
                                     ▼         ▼
-                              ┌───────────────────┐
-                              │      VECTOR       │
-                              │  (single instance) │
-                              └────────┬──────────┘
-                         Loki push / OTLP HTTP
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────┐
-│                           OBSIDIAN                                  │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                     Axum HTTP Server                         │   │
-│  │                                                              │   │
-│  │  Ingest Routes            Query Routes                       │   │
-│  │  ─────────────            ────────────                       │   │
-│  │  POST /loki/api/v1/push   GET /loki/api/v1/query{_range}    │   │
-│  │  POST /v1/metrics         GET /api/v1/query{_range}          │   │
-│  │  POST /v1/traces          GET /api/traces/{traceID}          │   │
-│  │                           GET /api/search                    │   │
-│  │                           GET /api/v1/services               │   │
-│  └──────┬───────────────────────────┬───────────────────────────┘   │
-│         │                           │                               │
-│  ┌──────▼──────┐  ┌────────────────▼────────────────────────┐      │
+┌──────────────────────────────────────────────────────────────────────┐
+│                           OBSIDIAN                                   │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────────────────┐   │
+│  │                     Axum HTTP Server                          │   │
+│  │                                                               │   │
+│  │  Ingest Routes             Query Routes         Management    │   │
+│  │  ─────────────             ────────────         ──────────    │   │
+│  │  POST /loki/api/v1/push    GET /loki/api/v1/…  GET /ready    │   │
+│  │  POST /v1/metrics          GET /api/v1/query…   /api/v1/…    │   │
+│  │  POST /v1/traces           GET /api/search      services     │   │
+│  │  POST /v1/logs             GET /api/traces/…    status        │   │
+│  │  POST /api/v1/write                             diagnose     │   │
+│  │                                                 catalog      │   │
+│  │                                                 metadata     │   │
+│  │                                                 openapi.json │   │
+│  │                                                 reset        │   │
+│  └──────┬────────────────────────────┬──────────────────────────┘   │
+│         │                            │                              │
+│  ┌──────▼──────┐  ┌─────────────────▼───────────────────────┐      │
 │  │  Ingestion  │  │          Query Engines                  │      │
 │  │  Pipeline   │  │  ┌────────┬─────────┬────────┐          │      │
 │  │             │  │  │ LogQL  │ PromQL  │TraceQL │          │      │
@@ -68,7 +66,7 @@ The name "Obsidian" is a placeholder — dark, glassy, reflects everything clear
 │  │  │  • restore on boot if snapshot exists               │  │     │
 │  │  └─────────────────────────────────────────────────────┘  │     │
 │  └───────────────────────────────────────────────────────────┘     │
-└────────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -139,7 +137,7 @@ All three API surfaces share a single port. Routes are disambiguated by path pre
 
 **Endpoint:** `POST /loki/api/v1/push`
 
-Accepts the Loki push format (JSON or Protobuf+Snappy). Vector's `loki` sink sends this natively.
+Accepts the Loki push format (JSON or Protobuf+Snappy).
 
 ```json
 {
@@ -164,7 +162,7 @@ Accepts the Loki push format (JSON or Protobuf+Snappy). Vector's `loki` sink sen
 
 **Endpoint:** `POST /v1/metrics`
 
-Accepts OTLP `ExportMetricsServiceRequest` (protobuf). Vector's `otlp` sink sends this. Protobuf types provided by `opentelemetry-proto` crate — no manual `.proto` compilation needed.
+Accepts OTLP `ExportMetricsServiceRequest` (protobuf). Services send this directly from their OpenTelemetry SDK. Protobuf types provided by `opentelemetry-proto` crate — no manual `.proto` compilation needed.
 
 **Processing:**
 1. Decode protobuf using `opentelemetry-proto` types, extract resource/scope/metric attributes
@@ -182,6 +180,23 @@ Accepts OTLP `ExportTraceServiceRequest` (protobuf). Types from `opentelemetry-p
 1. Decode protobuf using `opentelemetry-proto` types, extract resource/scope/span attributes
 2. Store span with full attribute set, intern label strings via `lasso::Rodeo`
 3. Index by: trace_id, service.name, span name, status
+
+### Logs — OTLP/HTTP
+
+**Endpoint:** `POST /v1/logs`
+
+Accepts OTLP `ExportLogsServiceRequest` (protobuf). An alternative to the Loki push API for services that emit logs via their OpenTelemetry SDK.
+
+**Processing:**
+1. Decode protobuf using `opentelemetry-proto` types, extract resource/scope/log record attributes
+2. Map to `LogEntry` with timestamp and body as the log line
+3. Promote `resource.service.name` to `service` label, store in `LogStore`
+
+### Metrics — Prometheus Remote Write
+
+**Endpoint:** `POST /api/v1/write`
+
+Accepts Prometheus remote write format for services that use the Prometheus client library directly.
 
 ---
 
@@ -229,6 +244,12 @@ Agents need to enumerate what services are reporting telemetry before writing ta
 |---|---|
 | `GET /api/v1/services` | List all known service names across logs, metrics, and traces |
 | `GET /api/v1/status` | Summary: service count, entry/sample/span counts, uptime, memory |
+| `GET /api/v1/diagnose` | Diagnostic overview of store health, indexing, and configuration |
+| `GET /api/v1/catalog` | Enumerate all known metric names, label names, and trace attributes |
+| `GET /api/v1/summary` | Compact summary of ingested data across all stores |
+| `GET /api/v1/metadata` | Metric type metadata (compatible with Prometheus metadata endpoint) |
+| `GET /api/v1/openapi.json` | OpenAPI specification for all Obsidian endpoints |
+| `DELETE /api/v1/reset` | Clear all stores (useful for test isolation) |
 
 ```json
 // GET /api/v1/services
@@ -263,14 +284,16 @@ Implementation: for each store, resolve the `Spur` for the `service` label name,
 
 ```rust
 use lasso::{Rodeo, Spur};
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 struct LogStore {
     /// Stream ID → stream data
-    streams: HashMap<u64, LogStream>,
+    streams: FxHashMap<u64, LogStream>,
     /// Label pair → set of stream IDs (inverted index)
-    label_index: HashMap<(Spur, Spur), PostingList>,
+    label_index: FxHashMap<(Spur, Spur), PostingList>,
     /// Label name → set of known values (for /labels endpoints)
-    label_values: HashMap<Spur, HashSet<Spur>>,
+    label_values: FxHashMap<Spur, FxHashSet<Spur>>,
     /// String interner (lasso::Rodeo)
     interner: Rodeo,
     /// Total entry count for eviction
@@ -282,8 +305,8 @@ struct PostingList {
 }
 
 struct LogStream {
-    labels: Vec<(Spur, Spur)>,
-    entries: VecDeque<LogEntry>,  // ring buffer, oldest evicted first
+    labels: SmallVec<[(Spur, Spur); 8]>,
+    entries: Vec<LogEntry>,  // sorted by timestamp, oldest evicted first
 }
 
 struct LogEntry {
@@ -299,19 +322,19 @@ struct LogEntry {
 ```rust
 struct MetricStore {
     /// Series ID → series data
-    series: HashMap<u64, MetricSeries>,
+    series: FxHashMap<u64, MetricSeries>,
     /// Metric name → set of series IDs
-    name_index: HashMap<Spur, PostingList>,
+    name_index: FxHashMap<Spur, PostingList>,
     /// Label pair → set of series IDs
-    label_index: HashMap<(Spur, Spur), PostingList>,
+    label_index: FxHashMap<(Spur, Spur), PostingList>,
     /// Label name → set of known values
-    label_values: HashMap<Spur, HashSet<Spur>>,
+    label_values: FxHashMap<Spur, FxHashSet<Spur>>,
     interner: Rodeo,
 }
 
 struct MetricSeries {
-    labels: Vec<(Spur, Spur)>,  // includes __name__
-    samples: VecDeque<Sample>,
+    labels: SmallVec<[(Spur, Spur); 8]>,  // includes __name__
+    samples: Vec<Sample>,  // sorted by timestamp
 }
 
 struct Sample {
@@ -327,11 +350,11 @@ struct Sample {
 ```rust
 struct TraceStore {
     /// trace_id (16 bytes) → list of spans
-    traces: HashMap<[u8; 16], Vec<Span>>,
+    traces: FxHashMap<[u8; 16], Vec<Span>>,
     /// Service name → set of trace IDs
-    service_index: HashMap<Spur, HashSet<[u8; 16]>>,
+    service_index: FxHashMap<Spur, FxHashSet<[u8; 16]>>,
     /// Span name → set of trace IDs
-    name_index: HashMap<Spur, HashSet<[u8; 16]>>,
+    name_index: FxHashMap<Spur, FxHashSet<[u8; 16]>>,
     interner: Rodeo,
 }
 
@@ -615,7 +638,7 @@ fn ingest_metrics(req: ExportMetricsServiceRequest, store: &mut MetricStore) {
 A typical worktree runs multiple services — an API gateway, a core payments engine, background workers, maybe a risk evaluator. All services send telemetry to a single Obsidian instance. Service identity flows through naturally:
 
 - **Metrics/Traces (OTLP):** The `resource.service.name` attribute is set by each service's OpenTelemetry SDK initialization. Obsidian extracts this on ingest and indexes it as a label, so `{service="payments-engine"}` and `{service="risk-evaluator"}` resolve to different posting lists.
-- **Logs (Loki push):** Vector attaches a `service` label based on the log source (file path, container name, or explicit label in config).
+- **Logs (Loki push / OTLP):** The sending service includes a `service` label in stream labels (Loki push) or sets `resource.service.name` (OTLP logs). Obsidian indexes it the same way in both cases.
 
 Agents can query a single service (`{service="payments-engine"} |= "timeout"`), compare across services (`rate(http_requests_total{service=~"api-gateway|payments-engine"}[5m])`), or trace a request across service boundaries via TraceQL's structural operators.
 
@@ -638,7 +661,7 @@ Implementation: union of unique values for the `service` label key (logs/metrics
 
 ### Boot Script
 
-The boot script starts Obsidian once, then boots all services pointing at it:
+The boot script starts Obsidian once, then boots all services pointing directly at it:
 
 ```bash
 #!/bin/bash
@@ -647,13 +670,9 @@ TREE_ID=$(basename "$(git rev-parse --show-toplevel)")
 if [ ! -f .env.local ]; then
   BASE_PORT=$(( ($(echo "$TREE_ID" | cksum | cut -d' ' -f1) % 1000) + 3000 ))
   OBSIDIAN_PORT=$(( BASE_PORT + 100 ))
-  VECTOR_OTLP_GRPC_PORT=$(( BASE_PORT + 200 ))
-  VECTOR_OTLP_HTTP_PORT=$(( BASE_PORT + 201 ))
   cat > .env.local <<EOF
 BASE_PORT=$BASE_PORT
 OBSIDIAN_PORT=$OBSIDIAN_PORT
-VECTOR_OTLP_GRPC_PORT=$VECTOR_OTLP_GRPC_PORT
-VECTOR_OTLP_HTTP_PORT=$VECTOR_OTLP_HTTP_PORT
 DATABASE_URL=postgres://localhost/myapp_$TREE_ID
 EOF
 fi
@@ -666,84 +685,20 @@ obsidian \
   --snapshot-dir ".obsidian/" \
   --retention "2h" &
 
-# 2. Boot vector (collects from all services, routes to obsidian)
-export VECTOR_LOKI_URL="http://127.0.0.1:${OBSIDIAN_PORT}"
-export VECTOR_OTLP_URL="http://127.0.0.1:${OBSIDIAN_PORT}"
-vector --config ./vector.toml &
-
-# 3. Boot services (each sets its own OTEL_SERVICE_NAME)
-OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:${VECTOR_OTLP_HTTP_PORT}" \
+# 2. Boot services (each sends OTLP directly to Obsidian)
+OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:${OBSIDIAN_PORT}" \
 OTEL_SERVICE_NAME="api-gateway" \
   ./target/release/api-gateway --port $((BASE_PORT)) &
 
-OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:${VECTOR_OTLP_HTTP_PORT}" \
+OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:${OBSIDIAN_PORT}" \
 OTEL_SERVICE_NAME="payments-engine" \
   ./target/release/payments-engine --port $((BASE_PORT + 1)) &
 
-OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:${VECTOR_OTLP_HTTP_PORT}" \
+OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:${OBSIDIAN_PORT}" \
 OTEL_SERVICE_NAME="risk-evaluator" \
   ./target/release/risk-evaluator --port $((BASE_PORT + 2)) &
 
 wait
-```
-
-### Vector Config
-
-Vector collects from all services and routes to the single Obsidian instance. Service identity is preserved through OTLP resource attributes (metrics/traces) and file-path-derived labels (logs):
-
-```toml
-# --- Sources: one OTLP receiver for all services ---
-
-[sources.services_otlp]
-type = "otlp"
-grpc.address = "127.0.0.1:${VECTOR_OTLP_GRPC_PORT}"
-http.address = "127.0.0.1:${VECTOR_OTLP_HTTP_PORT}"
-
-# --- Sources: log files per service ---
-
-[sources.logs_api_gateway]
-type = "file"
-include = ["./logs/api-gateway/*.log"]
-
-[sources.logs_payments_engine]
-type = "file"
-include = ["./logs/payments-engine/*.log"]
-
-[sources.logs_risk_evaluator]
-type = "file"
-include = ["./logs/risk-evaluator/*.log"]
-
-# --- Transforms: attach service label to logs ---
-
-[transforms.label_api_gateway]
-type = "remap"
-inputs = ["logs_api_gateway"]
-source = '.service = "api-gateway"'
-
-[transforms.label_payments_engine]
-type = "remap"
-inputs = ["logs_payments_engine"]
-source = '.service = "payments-engine"'
-
-[transforms.label_risk_evaluator]
-type = "remap"
-inputs = ["logs_risk_evaluator"]
-source = '.service = "risk-evaluator"'
-
-# --- Sinks: all telemetry → single Obsidian instance ---
-
-[sinks.obsidian_logs]
-type = "loki"
-inputs = ["label_api_gateway", "label_payments_engine", "label_risk_evaluator"]
-endpoint = "${VECTOR_LOKI_URL}"
-labels.service = "{{ service }}"
-labels.level = "{{ level }}"
-
-[sinks.obsidian_otlp]
-type = "otlp"
-inputs = ["services_otlp"]
-endpoint = "${VECTOR_OTLP_URL}"
-# service.name flows through OTLP resource attributes automatically
 ```
 
 ---
@@ -798,8 +753,8 @@ Using `promql-parser`, `opentelemetry-proto`, and `lasso` compresses the timelin
 - SIGUSR1 handler for on-demand snapshot + `--restore` flag
 - Timer-based auto-snapshot
 - Loki protobuf+snappy ingestion path
-- End-to-end integration test: Vector → Obsidian → query
-- Worktree boot script + sample Vector config
+- End-to-end integration test: service → Obsidian → query
+- Worktree boot script
 
 ---
 

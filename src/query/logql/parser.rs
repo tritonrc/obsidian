@@ -67,11 +67,14 @@ pub enum PipelineStage {
     LineRegex(String, Regex),    // |~ "regex"
     LineNotRegex(String, Regex), // !~ "regex"
     JsonExtract,                 // | json
+    LogfmtExtract,               // | logfmt
     LabelFilter {
         // | key="value"
         key: String,
         op: MatchOp,
         value: String,
+        /// Pre-compiled regex for Regex/NotRegex match ops, None for Eq/Neq.
+        compiled_regex: Option<Regex>,
     },
 }
 
@@ -81,6 +84,10 @@ pub enum MetricFunc {
     CountOverTime,
     Rate,
     BytesOverTime,
+    SumOverTime,
+    AvgOverTime,
+    MinOverTime,
+    MaxOverTime,
 }
 
 /// Parse a LogQL expression.
@@ -112,8 +119,12 @@ pub fn parse_logql(input: &str) -> Result<LogQLExpr, LogQLParseError> {
 fn parse_metric_query(input: &str) -> IResult<&str, LogQLExpr> {
     let (input, func) = alt((
         map(tag("count_over_time"), |_| MetricFunc::CountOverTime),
-        map(tag("rate"), |_| MetricFunc::Rate),
         map(tag("bytes_over_time"), |_| MetricFunc::BytesOverTime),
+        map(tag("sum_over_time"), |_| MetricFunc::SumOverTime),
+        map(tag("avg_over_time"), |_| MetricFunc::AvgOverTime),
+        map(tag("min_over_time"), |_| MetricFunc::MinOverTime),
+        map(tag("max_over_time"), |_| MetricFunc::MaxOverTime),
+        map(tag("rate"), |_| MetricFunc::Rate),
     ))
     .parse_complete(input)?;
 
@@ -274,6 +285,16 @@ fn parse_json_or_label_filter(input: &str) -> IResult<&str, PipelineStage> {
         }
     }
 
+    // Try "logfmt" keyword
+    if let Ok((rest, _)) =
+        tag::<&str, &str, nom::error::Error<&str>>("logfmt").parse_complete(input)
+    {
+        let next = rest.chars().next();
+        if next.is_none() || (!next.unwrap().is_alphanumeric() && next.unwrap() != '_') {
+            return Ok((rest, PipelineStage::LogfmtExtract));
+        }
+    }
+
     // Otherwise parse label filter: key op "value"
     let (input, key) =
         nom::bytes::take_while1(|c: char| c.is_alphanumeric() || c == '_').parse_complete(input)?;
@@ -288,12 +309,23 @@ fn parse_json_or_label_filter(input: &str) -> IResult<&str, PipelineStage> {
     let (input, _) = multispace0().parse_complete(input)?;
     let (input, value) = parse_quoted_string(input)?;
 
+    let compiled_regex = match op {
+        MatchOp::Regex | MatchOp::NotRegex => {
+            let re = Regex::new(&value).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?;
+            Some(re)
+        }
+        _ => None,
+    };
+
     Ok((
         input,
         PipelineStage::LabelFilter {
             key: key.to_string(),
             op,
             value,
+            compiled_regex,
         },
     ))
 }

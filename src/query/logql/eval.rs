@@ -134,6 +134,29 @@ fn evaluate_metric_query(
                     }
                 }
                 MetricFunc::BytesOverTime => filtered.iter().map(|e| e.line.len() as f64).sum(),
+                MetricFunc::SumOverTime => filtered
+                    .iter()
+                    .filter_map(|e| e.line.trim().parse::<f64>().ok())
+                    .sum(),
+                MetricFunc::AvgOverTime => {
+                    let values: Vec<f64> = filtered
+                        .iter()
+                        .filter_map(|e| e.line.trim().parse::<f64>().ok())
+                        .collect();
+                    if values.is_empty() {
+                        0.0
+                    } else {
+                        values.iter().sum::<f64>() / values.len() as f64
+                    }
+                }
+                MetricFunc::MinOverTime => filtered
+                    .iter()
+                    .filter_map(|e| e.line.trim().parse::<f64>().ok())
+                    .fold(f64::INFINITY, f64::min),
+                MetricFunc::MaxOverTime => filtered
+                    .iter()
+                    .filter_map(|e| e.line.trim().parse::<f64>().ok())
+                    .fold(f64::NEG_INFINITY, f64::max),
             };
 
             samples.push((t, value));
@@ -187,6 +210,20 @@ fn apply_stages(line: &str, stages: &[PipelineStage]) -> bool {
                     return false;
                 }
             }
+            PipelineStage::LogfmtExtract => {
+                for pair in line.split_whitespace() {
+                    if let Some((key, val)) = pair.split_once('=')
+                        && !key.is_empty()
+                    {
+                        // Trim surrounding quotes from value
+                        let val = val
+                            .strip_prefix('"')
+                            .and_then(|v| v.strip_suffix('"'))
+                            .unwrap_or(val);
+                        extracted.insert(key.to_string(), val.to_string());
+                    }
+                }
+            }
             PipelineStage::JsonExtract => {
                 let parsed: serde_json::Value = match serde_json::from_str(line) {
                     Ok(v) => v,
@@ -202,7 +239,12 @@ fn apply_stages(line: &str, stages: &[PipelineStage]) -> bool {
                     }
                 }
             }
-            PipelineStage::LabelFilter { key, op, value } => {
+            PipelineStage::LabelFilter {
+                key,
+                op,
+                value,
+                compiled_regex,
+            } => {
                 let label_val = match extracted.get(key.as_str()) {
                     Some(v) => v.as_str(),
                     None => return false, // label not found => filter fails
@@ -210,10 +252,12 @@ fn apply_stages(line: &str, stages: &[PipelineStage]) -> bool {
                 let matches = match op {
                     MatchOp::Eq => label_val == value,
                     MatchOp::Neq => label_val != value,
-                    MatchOp::Regex => regex::Regex::new(value)
+                    MatchOp::Regex => compiled_regex
+                        .as_ref()
                         .map(|re| re.is_match(label_val))
                         .unwrap_or(false),
-                    MatchOp::NotRegex => regex::Regex::new(value)
+                    MatchOp::NotRegex => compiled_regex
+                        .as_ref()
                         .map(|re| !re.is_match(label_val))
                         .unwrap_or(false),
                 };

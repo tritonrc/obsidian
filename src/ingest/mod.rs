@@ -13,8 +13,16 @@ pub mod otlp_metrics;
 pub mod otlp_traces;
 pub mod remote_write;
 
+/// Errors that can occur when decoding an ingestion request body.
+#[derive(Debug, thiserror::Error)]
+pub enum IngestError {
+    /// Gzip decompression of the request body failed.
+    #[error("gzip decompression failed: {0}")]
+    GzipDecompression(#[from] std::io::Error),
+}
+
 /// Decode a request body, decompressing gzip if the `content-encoding` header indicates it.
-pub fn decode_body<'a>(headers: &HeaderMap, body: &'a Bytes) -> Result<Cow<'a, [u8]>, String> {
+pub fn decode_body<'a>(headers: &HeaderMap, body: &'a Bytes) -> Result<Cow<'a, [u8]>, IngestError> {
     let is_gzip = headers
         .get("content-encoding")
         .and_then(|v| v.to_str().ok())
@@ -23,9 +31,7 @@ pub fn decode_body<'a>(headers: &HeaderMap, body: &'a Bytes) -> Result<Cow<'a, [
     if is_gzip {
         let mut decoder = flate2::read::GzDecoder::new(body.as_ref());
         let mut decompressed = Vec::new();
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|e| format!("gzip decompression failed: {}", e))?;
+        decoder.read_to_end(&mut decompressed)?;
         Ok(Cow::Owned(decompressed))
     } else {
         Ok(Cow::Borrowed(body.as_ref()))

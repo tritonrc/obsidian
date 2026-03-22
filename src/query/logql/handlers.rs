@@ -152,7 +152,7 @@ async fn query_range_inner(
                 );
             }
         },
-        None => Some(60_000_000_000),
+        None => None,
     };
 
     if step_ns == Some(0) {

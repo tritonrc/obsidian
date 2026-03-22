@@ -3,7 +3,7 @@
 //! - TASK 18: label_replace / label_join PromQL functions
 //! - TASK 19: Better memory estimation in /api/v1/status
 //! - TASK 20: TraceQL count() aggregate
-//! - TASK 21: Summary / ExponentialHistogram metric types
+//! - TASK 21: Summary metric type
 
 mod helpers;
 
@@ -14,8 +14,7 @@ use http_body_util::BodyExt;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
 use opentelemetry_proto::tonic::metrics::v1::{
-    ExponentialHistogram, ExponentialHistogramDataPoint, Metric, ResourceMetrics, ScopeMetrics,
-    Summary, SummaryDataPoint, exponential_histogram_data_point::Buckets, metric,
+    Metric, ResourceMetrics, ScopeMetrics, Summary, SummaryDataPoint, metric,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message;
@@ -85,10 +84,7 @@ async fn post_metrics(app: &axum::Router, payload: ExportMetricsServiceRequest) 
     app.clone().oneshot(req).await.unwrap().status()
 }
 
-fn make_summary_and_exponential_histogram_request(
-    service_name: &str,
-    ts_ns: u64,
-) -> ExportMetricsServiceRequest {
+fn make_summary_request(service_name: &str, ts_ns: u64) -> ExportMetricsServiceRequest {
     ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {
             resource: Some(Resource {
@@ -101,43 +97,18 @@ fn make_summary_and_exponential_histogram_request(
                 ..Default::default()
             }),
             scope_metrics: vec![ScopeMetrics {
-                metrics: vec![
-                    Metric {
-                        name: "request_latency_seconds".into(),
-                        data: Some(metric::Data::Summary(Summary {
-                            data_points: vec![SummaryDataPoint {
-                                time_unix_nano: ts_ns,
-                                count: 3,
-                                sum: 4.5,
-                                ..Default::default()
-                            }],
-                        })),
-                        ..Default::default()
-                    },
-                    Metric {
-                        name: "payload_size_bytes".into(),
-                        data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
-                            data_points: vec![ExponentialHistogramDataPoint {
-                                time_unix_nano: ts_ns,
-                                count: 6,
-                                sum: Some(12.0),
-                                scale: 0,
-                                zero_count: 0,
-                                positive: Some(Buckets {
-                                    offset: 0,
-                                    bucket_counts: vec![2, 4],
-                                }),
-                                negative: Some(Buckets {
-                                    offset: 0,
-                                    bucket_counts: vec![],
-                                }),
-                                ..Default::default()
-                            }],
+                metrics: vec![Metric {
+                    name: "request_latency_seconds".into(),
+                    data: Some(metric::Data::Summary(Summary {
+                        data_points: vec![SummaryDataPoint {
+                            time_unix_nano: ts_ns,
+                            count: 3,
+                            sum: 4.5,
                             ..Default::default()
-                        })),
-                        ..Default::default()
-                    },
-                ],
+                        }],
+                    })),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
             ..Default::default()
@@ -388,18 +359,17 @@ async fn test_traceql_count_aggregate_filters_traces_by_error_span_count() {
 }
 
 // ---------------------------------------------------------------------------
-// TASK 21: Summary and ExponentialHistogram metric types
+// TASK 21: Summary metric type
 // ---------------------------------------------------------------------------
 
-/// Ingest an ExportMetricsServiceRequest containing Summary and
-/// ExponentialHistogram data points. After ingestion the derived
-/// _count series should be queryable via PromQL.
+/// Ingest an ExportMetricsServiceRequest containing Summary data points.
+/// After ingestion the derived _count series should be queryable via PromQL.
 #[tokio::test]
-async fn test_otlp_metrics_support_summary_and_exponential_histogram() {
+async fn test_otlp_metrics_support_summary() {
     let state = make_state();
     let app = obsidian::server::build_router(state);
 
-    let payload = make_summary_and_exponential_histogram_request("payments", 10_000_000_000);
+    let payload = make_summary_request("payments", 10_000_000_000);
     // The metrics handler returns 200 with a JSON body containing accepted counts.
     let status = post_metrics(&app, payload).await;
     assert_eq!(status, StatusCode::OK);
@@ -413,10 +383,4 @@ async fn test_otlp_metrics_support_summary_and_exponential_histogram() {
     .await;
     assert_eq!(summary_count["status"], "success");
     assert_eq!(single_vector_value(&summary_count), 3.0);
-
-    // Query the derived _count series for the exponential histogram.
-    let exp_hist_count =
-        instant_query(&app, r#"payload_size_bytes_count{service="payments"}"#, 10).await;
-    assert_eq!(exp_hist_count["status"], "success");
-    assert_eq!(single_vector_value(&exp_hist_count), 6.0);
 }

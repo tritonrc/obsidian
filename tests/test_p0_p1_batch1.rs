@@ -256,23 +256,15 @@ async fn test_otlp_logs_malformed_body_returns_400() {
 }
 
 // ===========================================================================
-// Task 2: Unified Diagnostic Summary (GET /api/v1/summary)
+// Task 2: Diagnose endpoint (GET /api/v1/diagnose) — per-service mode
 // ===========================================================================
 //
-// Expected contract for the summary endpoint:
-//   GET /api/v1/summary?service=<name>
-//   Returns JSON with:
-//   {
-//     "service": "<name>",
-//     "errors": {
-//       "logs": [ { "timestamp": "...", "line": "..." }, ... ],
-//       "metrics": [ { "name": "...", "labels": {...}, "value": ... }, ... ],
-//       "traces": [ { "traceID": "...", "rootServiceName": "...", ... }, ... ]
-//     }
-//   }
+// The diagnose endpoint replaces the former /api/v1/summary endpoint.
+// With ?service=<name>, it returns a detailed health assessment including
+// recent_errors, key_metrics, slowest_traces, health_score, etc.
 
 #[tokio::test]
-async fn test_summary_endpoint_returns_only_error_signals() {
+async fn test_diagnose_endpoint_returns_error_signals() {
     let state = make_state();
     let app = obsidian::server::build_router(state.clone());
 
@@ -298,7 +290,7 @@ async fn test_summary_endpoint_returns_only_error_signals() {
         app.clone().oneshot(req).await.unwrap();
     }
 
-    // --- Ingest info log (should NOT appear in summary) ---
+    // --- Ingest info log (should NOT appear in recent_errors) ---
     {
         let push_body = serde_json::json!({
             "streams": [{
@@ -334,7 +326,7 @@ async fn test_summary_endpoint_returns_only_error_signals() {
         app.clone().oneshot(req).await.unwrap();
     }
 
-    // --- Ingest normal metric (should NOT appear in summary) ---
+    // --- Ingest normal metric ---
     ingest_metrics(&app, "payments", "http_requests_total", 100.0, now_ns).await;
 
     // --- Ingest error trace ---
@@ -351,7 +343,7 @@ async fn test_summary_endpoint_returns_only_error_signals() {
     )
     .await;
 
-    // --- Ingest ok trace (should NOT appear in summary) ---
+    // --- Ingest ok trace ---
     let ok_trace_id: [u8; 16] = [0xbb; 16];
     ingest_traces(
         &app,
@@ -365,56 +357,59 @@ async fn test_summary_endpoint_returns_only_error_signals() {
     )
     .await;
 
-    // --- Query the summary ---
+    // --- Query diagnose ---
     let req = Request::builder()
         .method("GET")
-        .uri("/api/v1/summary?service=payments")
+        .uri("/api/v1/diagnose?service=payments")
         .body(Body::empty())
         .unwrap();
 
     let (status, json) = send(&app, req).await;
-    assert_eq!(status, StatusCode::OK, "summary endpoint should return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "diagnose endpoint should return 200"
+    );
 
     // Verify service name
     assert_eq!(json["service"].as_str().unwrap(), "payments");
 
-    // Verify error logs present, info logs absent
-    let error_logs = json["errors"]["logs"].as_array().unwrap();
+    // Verify recent_errors present, info logs absent
+    let recent_errors = json["recent_errors"].as_array().unwrap();
     assert!(
-        !error_logs.is_empty(),
-        "expected error logs in summary, got: {}",
+        !recent_errors.is_empty(),
+        "expected error logs in recent_errors, got: {}",
         json
     );
-    for log in error_logs {
+    for log in recent_errors {
         let line = log["line"].as_str().unwrap_or("");
         assert!(
             !line.contains("payment ok"),
-            "info log should not appear in error summary"
+            "info log should not appear in recent_errors"
         );
     }
 
-    // Verify error traces present
-    let error_traces = json["errors"]["traces"].as_array().unwrap();
-    assert!(!error_traces.is_empty(), "expected error traces in summary");
-    // The ok trace should not be in the error summary
-    let ok_hex = hex_trace_id(&ok_trace_id);
-    for trace in error_traces {
-        assert_ne!(
-            trace["traceID"].as_str().unwrap_or(""),
-            ok_hex,
-            "ok trace should not appear in error summary"
-        );
-    }
+    // Verify slowest_traces present (both traces should appear)
+    let slowest = json["slowest_traces"].as_array().unwrap();
+    assert!(!slowest.is_empty(), "expected traces in slowest_traces");
+
+    // Health score should be degraded (errors present)
+    let health_score = json["health_score"].as_f64().unwrap();
+    assert!(
+        health_score < 100.0,
+        "health_score should be degraded with errors, got: {}",
+        health_score
+    );
 }
 
 #[tokio::test]
-async fn test_summary_endpoint_unknown_service_returns_empty() {
+async fn test_diagnose_endpoint_unknown_service_returns_healthy() {
     let state = make_state();
     let app = obsidian::server::build_router(state);
 
     let req = Request::builder()
         .method("GET")
-        .uri("/api/v1/summary?service=nonexistent")
+        .uri("/api/v1/diagnose?service=nonexistent")
         .body(Body::empty())
         .unwrap();
 
@@ -422,35 +417,43 @@ async fn test_summary_endpoint_unknown_service_returns_empty() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["service"].as_str().unwrap(), "nonexistent");
 
-    // All error arrays should be empty
-    let empty_vec = vec![];
-    let logs = json["errors"]["logs"].as_array().unwrap_or(&empty_vec);
-    let metrics = json["errors"]["metrics"].as_array().unwrap_or(&empty_vec);
-    let traces = json["errors"]["traces"].as_array().unwrap_or(&empty_vec);
-    assert!(logs.is_empty(), "expected no logs for unknown service");
+    // Unknown service should have perfect health
+    let health_score = json["health_score"].as_f64().unwrap();
     assert!(
-        metrics.is_empty(),
-        "expected no metrics for unknown service"
+        (health_score - 100.0).abs() < f64::EPSILON,
+        "unknown service should have health_score 100, got: {}",
+        health_score
     );
-    assert!(traces.is_empty(), "expected no traces for unknown service");
+
+    // Empty arrays for errors/traces
+    let recent_errors = json["recent_errors"].as_array().unwrap();
+    assert!(
+        recent_errors.is_empty(),
+        "expected no errors for unknown service"
+    );
+    let slowest = json["slowest_traces"].as_array().unwrap();
+    assert!(slowest.is_empty(), "expected no traces for unknown service");
 }
 
 #[tokio::test]
-async fn test_summary_endpoint_missing_service_param_returns_400() {
+async fn test_diagnose_endpoint_no_service_returns_global_overview() {
     let state = make_state();
     let app = obsidian::server::build_router(state);
 
     let req = Request::builder()
         .method("GET")
-        .uri("/api/v1/summary")
+        .uri("/api/v1/diagnose")
         .body(Body::empty())
         .unwrap();
 
-    let (status, _) = send(&app, req).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "missing service param should return 400"
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "global diagnose should return 200");
+
+    // Should have a services array (possibly empty if no data ingested)
+    assert!(
+        json["services"].is_array(),
+        "global diagnose should have services array, got: {}",
+        json
     );
 }
 

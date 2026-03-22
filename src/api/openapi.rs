@@ -279,11 +279,19 @@ fn spec() -> Value {
         simple_get("Get store statistics and health info", "discovery"),
     );
     paths.insert(
-        "/api/v1/summary".into(),
-        simple_get(
-            "Get an agent-friendly summary of all telemetry data",
-            "discovery",
-        ),
+        "/api/v1/diagnose".into(),
+        json!({
+            "get": {
+                "summary": "Health assessment: global overview or per-service diagnosis",
+                "tags": ["discovery"],
+                "parameters": [
+                    { "name": "service", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Service name. Omit for global overview." }
+                ],
+                "responses": {
+                    "200": { "description": "Health assessment", "content": { "application/json": {} } }
+                }
+            }
+        }),
     );
     paths.insert(
         "/api/v1/catalog".into(),
@@ -465,7 +473,7 @@ mod tests {
             "/v1/metrics",
             "/v1/traces",
             "/v1/logs",
-            "/api/v1/summary",
+            "/api/v1/diagnose",
             "/api/v1/catalog",
             "/api/v1/reset",
             "/api/v1/metadata",

@@ -49,6 +49,32 @@ pub fn evaluate_traceql(expr: &TraceQLExpr, store: &TraceStore) -> Vec<TraceResu
     }
 }
 
+/// Compare a u64 value against a target using the given operator.
+fn compare_u64(a: u64, op: &CompareOp, b: u64) -> bool {
+    match op {
+        CompareOp::Eq => a == b,
+        CompareOp::Neq => a != b,
+        CompareOp::Gt => a > b,
+        CompareOp::Lt => a < b,
+        CompareOp::Gte => a >= b,
+        CompareOp::Lte => a <= b,
+        CompareOp::Regex => false,
+    }
+}
+
+/// Compare an i64 duration (nanoseconds) against a target using the given operator.
+fn compare_duration_ns(a: i64, op: &CompareOp, b: i64) -> bool {
+    match op {
+        CompareOp::Eq => a == b,
+        CompareOp::Neq => a != b,
+        CompareOp::Gt => a > b,
+        CompareOp::Lt => a < b,
+        CompareOp::Gte => a >= b,
+        CompareOp::Lte => a <= b,
+        CompareOp::Regex => false,
+    }
+}
+
 /// Apply a pipeline stage to filter trace results.
 fn apply_pipeline_stage(results: Vec<TraceResult>, stage: &PipelineStage) -> Vec<TraceResult> {
     match stage {
@@ -56,15 +82,48 @@ fn apply_pipeline_stage(results: Vec<TraceResult>, stage: &PipelineStage) -> Vec
             .into_iter()
             .filter(|r| {
                 let count = r.matched_spans.len() as u64;
-                match op {
-                    CompareOp::Eq => count == *value,
-                    CompareOp::Neq => count != *value,
-                    CompareOp::Gt => count > *value,
-                    CompareOp::Lt => count < *value,
-                    CompareOp::Gte => count >= *value,
-                    CompareOp::Lte => count <= *value,
-                    CompareOp::Regex => false,
+                compare_u64(count, op, *value)
+            })
+            .collect(),
+        PipelineStage::AvgDuration { op, value_ns } => results
+            .into_iter()
+            .filter(|r| {
+                if r.matched_spans.is_empty() {
+                    return false;
                 }
+                let total: i64 = r.matched_spans.iter().map(|s| s.duration_ns).sum();
+                let avg = total / r.matched_spans.len() as i64;
+                compare_duration_ns(avg, op, *value_ns)
+            })
+            .collect(),
+        PipelineStage::MaxDuration { op, value_ns } => results
+            .into_iter()
+            .filter(|r| {
+                if r.matched_spans.is_empty() {
+                    return false;
+                }
+                let max_dur = r
+                    .matched_spans
+                    .iter()
+                    .map(|s| s.duration_ns)
+                    .max()
+                    .unwrap_or(0);
+                compare_duration_ns(max_dur, op, *value_ns)
+            })
+            .collect(),
+        PipelineStage::MinDuration { op, value_ns } => results
+            .into_iter()
+            .filter(|r| {
+                if r.matched_spans.is_empty() {
+                    return false;
+                }
+                let min_dur = r
+                    .matched_spans
+                    .iter()
+                    .map(|s| s.duration_ns)
+                    .min()
+                    .unwrap_or(0);
+                compare_duration_ns(min_dur, op, *value_ns)
             })
             .collect(),
     }

@@ -12,10 +12,6 @@ use smallvec::SmallVec;
 
 use super::posting_list::{PostingList, intersect, union};
 
-/// Unique identifier for a log stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StreamId(pub u64);
-
 /// A single log entry with nanosecond timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {

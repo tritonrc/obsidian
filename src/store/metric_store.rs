@@ -11,10 +11,6 @@ use smallvec::SmallVec;
 
 use super::posting_list::{PostingList, intersect, union};
 
-/// Unique identifier for a metric series.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SeriesId(pub u64);
-
 /// A single metric sample.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Sample {

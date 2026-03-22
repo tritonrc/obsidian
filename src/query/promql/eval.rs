@@ -153,9 +153,14 @@ fn eval_vector_selector(
     if instant || step_ms == 0 {
         // Instant query: find latest sample for each series at or before end_ms
         let lookback_ms = 5 * 60 * 1000; // 5-minute lookback
+        let forward_buffer_ms = 1000; // 1s forward tolerance for timestamp rounding
         let effective_end = end_ms - offset_ms;
         for sid in &series_ids {
-            let samples = store.get_samples(*sid, effective_end - lookback_ms, effective_end);
+            let samples = store.get_samples(
+                *sid,
+                effective_end - lookback_ms,
+                effective_end + forward_buffer_ms,
+            );
             if let Some(last) = samples.last() {
                 let labels = store.get_series_labels(*sid).unwrap_or_default();
                 results.push(SeriesResult {
@@ -241,11 +246,12 @@ fn eval_call(
     let func_name = call.func.name;
 
     match func_name {
-        "rate" | "increase" | "irate" => {
+        "rate" | "increase" | "irate" | "delta" | "deriv" => {
             if call.args.args.is_empty() {
-                return Err(PromQLError::Eval(
-                    "rate/increase requires a range vector argument".into(),
-                ));
+                return Err(PromQLError::Eval(format!(
+                    "{} requires a range vector argument",
+                    func_name
+                )));
             }
             let arg = &call.args.args[0];
             eval_rate_like(func_name, arg, store, start_ms, end_ms, step_ms, instant)
@@ -300,6 +306,237 @@ fn eval_call(
         }
         "label_replace" => eval_label_replace(call, store, start_ms, end_ms, step_ms, instant),
         "label_join" => eval_label_join(call, store, start_ms, end_ms, step_ms, instant),
+        "absent" => {
+            if call.args.args.is_empty() {
+                return Err(PromQLError::Eval("absent requires an argument".into()));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            match inner {
+                PromQLResult::InstantVector(series) if series.is_empty() => {
+                    Ok(PromQLResult::InstantVector(vec![SeriesResult {
+                        labels: Vec::new(),
+                        samples: vec![(end_ms, 1.0)],
+                    }]))
+                }
+                PromQLResult::InstantVector(_) => Ok(PromQLResult::InstantVector(Vec::new())),
+                PromQLResult::RangeVector(series) if series.is_empty() => {
+                    Ok(PromQLResult::InstantVector(vec![SeriesResult {
+                        labels: Vec::new(),
+                        samples: vec![(end_ms, 1.0)],
+                    }]))
+                }
+                PromQLResult::RangeVector(_) => Ok(PromQLResult::InstantVector(Vec::new())),
+                PromQLResult::Scalar(_) => Ok(PromQLResult::InstantVector(Vec::new())),
+            }
+        }
+        "sort" | "sort_desc" => {
+            if call.args.args.is_empty() {
+                return Err(PromQLError::Eval(format!(
+                    "{} requires an argument",
+                    func_name
+                )));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            match inner {
+                PromQLResult::InstantVector(mut series) => {
+                    if func_name == "sort" {
+                        series.sort_by(|a, b| {
+                            let a_val = a.samples.last().map(|(_, v)| *v).unwrap_or(f64::NAN);
+                            let b_val = b.samples.last().map(|(_, v)| *v).unwrap_or(f64::NAN);
+                            a_val
+                                .partial_cmp(&b_val)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    } else {
+                        series.sort_by(|a, b| {
+                            let a_val = a.samples.last().map(|(_, v)| *v).unwrap_or(f64::NAN);
+                            let b_val = b.samples.last().map(|(_, v)| *v).unwrap_or(f64::NAN);
+                            b_val
+                                .partial_cmp(&a_val)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    }
+                    Ok(PromQLResult::InstantVector(series))
+                }
+                other => Ok(other),
+            }
+        }
+        "clamp" => {
+            if call.args.args.len() < 3 {
+                return Err(PromQLError::Eval(
+                    "clamp requires 3 arguments: vector, min, max".into(),
+                ));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            let min_val = match eval_expr(
+                &call.args.args[1],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )? {
+                PromQLResult::Scalar(v) => v,
+                _ => {
+                    return Err(PromQLError::Eval(
+                        "clamp min argument must be a scalar".into(),
+                    ));
+                }
+            };
+            let max_val = match eval_expr(
+                &call.args.args[2],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )? {
+                PromQLResult::Scalar(v) => v,
+                _ => {
+                    return Err(PromQLError::Eval(
+                        "clamp max argument must be a scalar".into(),
+                    ));
+                }
+            };
+            apply_clamp(inner, Some(min_val), Some(max_val))
+        }
+        "clamp_min" => {
+            if call.args.args.len() < 2 {
+                return Err(PromQLError::Eval(
+                    "clamp_min requires 2 arguments: vector, min".into(),
+                ));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            let min_val = match eval_expr(
+                &call.args.args[1],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )? {
+                PromQLResult::Scalar(v) => v,
+                _ => {
+                    return Err(PromQLError::Eval(
+                        "clamp_min argument must be a scalar".into(),
+                    ));
+                }
+            };
+            apply_clamp(inner, Some(min_val), None)
+        }
+        "clamp_max" => {
+            if call.args.args.len() < 2 {
+                return Err(PromQLError::Eval(
+                    "clamp_max requires 2 arguments: vector, max".into(),
+                ));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            let max_val = match eval_expr(
+                &call.args.args[1],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )? {
+                PromQLResult::Scalar(v) => v,
+                _ => {
+                    return Err(PromQLError::Eval(
+                        "clamp_max argument must be a scalar".into(),
+                    ));
+                }
+            };
+            apply_clamp(inner, None, Some(max_val))
+        }
+        "time" => {
+            // time() returns the evaluation timestamp as a single-element instant vector
+            let time_s = end_ms as f64 / 1000.0;
+            Ok(PromQLResult::InstantVector(vec![SeriesResult {
+                labels: Vec::new(),
+                samples: vec![(end_ms, time_s)],
+            }]))
+        }
+        "vector" => {
+            if call.args.args.is_empty() {
+                return Err(PromQLError::Eval("vector requires an argument".into()));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            match inner {
+                PromQLResult::Scalar(v) => Ok(PromQLResult::InstantVector(vec![SeriesResult {
+                    labels: Vec::new(),
+                    samples: vec![(end_ms, v)],
+                }])),
+                other => Ok(other),
+            }
+        }
+        "scalar" => {
+            if call.args.args.is_empty() {
+                return Err(PromQLError::Eval("scalar requires an argument".into()));
+            }
+            let inner = eval_expr(
+                &call.args.args[0],
+                store,
+                start_ms,
+                end_ms,
+                step_ms,
+                instant,
+            )?;
+            match inner {
+                PromQLResult::InstantVector(series) if series.len() == 1 => {
+                    let val = series[0]
+                        .samples
+                        .first()
+                        .map(|(_, v)| *v)
+                        .unwrap_or(f64::NAN);
+                    Ok(PromQLResult::Scalar(val))
+                }
+                PromQLResult::InstantVector(_) => Ok(PromQLResult::Scalar(f64::NAN)),
+                PromQLResult::Scalar(v) => Ok(PromQLResult::Scalar(v)),
+                _ => Ok(PromQLResult::Scalar(f64::NAN)),
+            }
+        }
         _ => Err(PromQLError::Unsupported(format!("function: {}", func_name))),
     }
 }
@@ -393,7 +630,31 @@ fn compute_rate_like(func_name: &str, samples: &[Sample], range_ms: i64) -> Opti
                 None
             }
         }
-        "increase" => Some(value_delta),
+        "increase" | "delta" => Some(value_delta),
+        "deriv" => {
+            // Linear regression using centered x values for numerical stability.
+            // slope = Σ((x_i - x_mean)*(y_i - y_mean)) / Σ((x_i - x_mean)^2)
+            let n = samples.len() as f64;
+            let x_mean: f64 = samples
+                .iter()
+                .map(|s| s.timestamp_ms as f64 / 1000.0)
+                .sum::<f64>()
+                / n;
+            let y_mean: f64 = samples.iter().map(|s| s.value).sum::<f64>() / n;
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for s in samples {
+                let dx = s.timestamp_ms as f64 / 1000.0 - x_mean;
+                let dy = s.value - y_mean;
+                num += dx * dy;
+                den += dx * dx;
+            }
+            if den.abs() < f64::EPSILON {
+                None
+            } else {
+                Some(num / den)
+            }
+        }
         "irate" => {
             if samples.len() >= 2 {
                 let prev = &samples[samples.len() - 2];
@@ -877,6 +1138,51 @@ fn apply_scalar_func(func_name: &str, result: PromQLResult) -> Result<PromQLResu
                 _ => v,
             };
             Ok(PromQLResult::Scalar(result))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Clamp each sample value in a vector by optional min/max bounds.
+fn apply_clamp(
+    result: PromQLResult,
+    min_val: Option<f64>,
+    max_val: Option<f64>,
+) -> Result<PromQLResult, PromQLError> {
+    match result {
+        PromQLResult::InstantVector(series) => {
+            let mapped: Vec<SeriesResult> = series
+                .into_iter()
+                .map(|mut sr| {
+                    for sample in &mut sr.samples {
+                        if let Some(min) = min_val
+                            && sample.1 < min
+                        {
+                            sample.1 = min;
+                        }
+                        if let Some(max) = max_val
+                            && sample.1 > max
+                        {
+                            sample.1 = max;
+                        }
+                    }
+                    sr
+                })
+                .collect();
+            Ok(PromQLResult::InstantVector(mapped))
+        }
+        PromQLResult::Scalar(mut v) => {
+            if let Some(min) = min_val
+                && v < min
+            {
+                v = min;
+            }
+            if let Some(max) = max_val
+                && v > max
+            {
+                v = max;
+            }
+            Ok(PromQLResult::Scalar(v))
         }
         other => Ok(other),
     }
