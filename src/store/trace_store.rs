@@ -274,6 +274,20 @@ impl TraceStore {
         })
     }
 
+    /// Return summaries of the most recent traces, up to `limit`.
+    ///
+    /// Traces are sorted by start time descending (most recent first).
+    pub fn recent_traces(&self, limit: usize) -> Vec<TraceResult> {
+        let mut results: Vec<TraceResult> = self
+            .traces
+            .keys()
+            .filter_map(|tid| self.trace_result(tid))
+            .collect();
+        results.sort_by(|a, b| b.start_time_ns.cmp(&a.start_time_ns));
+        results.truncate(limit);
+        results
+    }
+
     /// Clear all data from the store.
     pub fn clear(&mut self) {
         self.traces.clear();
@@ -589,5 +603,85 @@ mod tests {
         assert_eq!(result.span_count, 2);
         assert_eq!(result.start_time_ns, 1000);
         assert_eq!(result.duration_ns, 500); // 1000+500=1500 - 1000
+    }
+
+    #[test]
+    fn test_recent_traces_returns_most_recent_first() {
+        let mut store = TraceStore::new();
+
+        let old = make_span(
+            &mut store.interner,
+            [1u8; 16],
+            [1u8; 8],
+            None,
+            "old-span",
+            "svc",
+            1000,
+            100,
+            SpanStatus::Ok,
+        );
+        let mid = make_span(
+            &mut store.interner,
+            [2u8; 16],
+            [2u8; 8],
+            None,
+            "mid-span",
+            "svc",
+            5000,
+            100,
+            SpanStatus::Ok,
+        );
+        let new = make_span(
+            &mut store.interner,
+            [3u8; 16],
+            [3u8; 8],
+            None,
+            "new-span",
+            "svc",
+            9000,
+            100,
+            SpanStatus::Ok,
+        );
+        store.ingest_spans(vec![old, mid, new]);
+
+        let recent = store.recent_traces(10);
+        assert_eq!(recent.len(), 3);
+        // Most recent first
+        assert_eq!(recent[0].root_span_name, "new-span");
+        assert_eq!(recent[1].root_span_name, "mid-span");
+        assert_eq!(recent[2].root_span_name, "old-span");
+    }
+
+    #[test]
+    fn test_recent_traces_respects_limit() {
+        let mut store = TraceStore::new();
+
+        for i in 0..5u8 {
+            let span = make_span(
+                &mut store.interner,
+                [i; 16],
+                [i; 8],
+                None,
+                &format!("span-{}", i),
+                "svc",
+                i as i64 * 1000,
+                100,
+                SpanStatus::Ok,
+            );
+            store.ingest_spans(vec![span]);
+        }
+
+        let recent = store.recent_traces(2);
+        assert_eq!(recent.len(), 2);
+        // Most recent two
+        assert_eq!(recent[0].start_time_ns, 4000);
+        assert_eq!(recent[1].start_time_ns, 3000);
+    }
+
+    #[test]
+    fn test_recent_traces_empty_store() {
+        let store = TraceStore::new();
+        let recent = store.recent_traces(10);
+        assert!(recent.is_empty());
     }
 }

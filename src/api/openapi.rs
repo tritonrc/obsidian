@@ -12,18 +12,22 @@ fn protobuf_post(summary: &str, tag: &str) -> Value {
     json!({
         "post": {
             "summary": summary,
+            "description": "Accepts protobuf (default, Content-Type: application/x-protobuf) or JSON (Content-Type: application/json) encoded OTLP payloads. Gzip compression is supported via Content-Encoding: gzip.",
             "tags": [tag],
             "requestBody": {
                 "required": true,
                 "content": {
                     "application/x-protobuf": {
                         "schema": { "type": "string", "format": "binary" }
+                    },
+                    "application/json": {
+                        "schema": { "type": "object" }
                     }
                 }
             },
             "responses": {
                 "200": { "description": "Success" },
-                "400": { "description": "Invalid protobuf payload" }
+                "400": { "description": "Invalid payload" }
             }
         }
     })
@@ -234,10 +238,13 @@ fn spec() -> Value {
         json!({
             "get": {
                 "summary": "Search traces via TraceQL",
+                "description": "When the `q` parameter is omitted or empty, returns the most recent traces (up to `limit`, default 20). This is the behavior Grafana Tempo expects for datasource health checks.",
                 "tags": ["traceql"],
                 "parameters": [
-                    { "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "description": "TraceQL query expression" },
-                    { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Maximum number of traces to return" }
+                    { "name": "q", "in": "query", "required": false, "schema": { "type": "string" }, "description": "TraceQL query expression. Omit to list recent traces." },
+                    { "name": "start", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Start of time range — epoch seconds or nanoseconds (auto-detected)" },
+                    { "name": "end", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "End of time range — epoch seconds or nanoseconds (auto-detected)" },
+                    { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Maximum number of traces to return (default 20)" }
                 ],
                 "responses": {
                     "200": { "description": "Search results", "content": {

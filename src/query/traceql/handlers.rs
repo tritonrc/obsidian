@@ -15,13 +15,34 @@ use crate::store::trace_store::SpanStatus;
 /// Hint included in TraceQL parse error responses to help agents construct valid queries.
 const TRACEQL_HINT: &str = "Example: { resource.service.name = \"myapp\" && status = error }";
 
+/// Default limit of traces returned when no query is provided.
+const DEFAULT_RECENT_TRACES_LIMIT: usize = 20;
+
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {
     pub q: Option<String>,
-    /// Optional start time filter (epoch seconds).
+    /// Optional start time filter (epoch seconds or nanoseconds).
     pub start: Option<u64>,
-    /// Optional end time filter (epoch seconds).
+    /// Optional end time filter (epoch seconds or nanoseconds).
     pub end: Option<u64>,
+    /// Maximum number of traces to return. Defaults to 20 when no query.
+    pub limit: Option<usize>,
+}
+
+/// Convert a timestamp parameter to nanoseconds.
+///
+/// Heuristic: values below 1e15 are treated as epoch seconds, values at
+/// or above 1e15 are treated as nanoseconds. This threshold corresponds
+/// to roughly the year 33,658,145 in seconds but only year 2001 in nanos,
+/// so real-world timestamps will always sort into the correct bucket.
+fn param_to_ns(val: u64) -> i64 {
+    if val >= 1_000_000_000_000_000 {
+        // Already nanoseconds
+        val as i64
+    } else {
+        // Seconds — convert
+        val as i64 * 1_000_000_000
+    }
 }
 
 /// GET /api/search
@@ -29,11 +50,45 @@ pub async fn search(
     State(state): State<SharedState>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
-    // If no query is provided (or it's empty), return empty traces array.
-    // Grafana calls /api/search without a query on datasource setup.
+    let store = state.trace_store.read();
+
+    // Convert start/end from epoch seconds (or nanoseconds) for filtering.
+    let start_ns = params.start.map(param_to_ns);
+    let end_ns = params.end.map(param_to_ns);
+
     let q = params.q.unwrap_or_default();
     if q.is_empty() {
-        return (StatusCode::OK, Json(json!({"traces": []})));
+        // No query: return recent traces, optionally filtered by time range.
+        let limit = params.limit.unwrap_or(DEFAULT_RECENT_TRACES_LIMIT);
+        let mut recent = store.recent_traces(store.traces.len());
+
+        // Apply time range filter
+        if start_ns.is_some() || end_ns.is_some() {
+            recent.retain(|tr| {
+                let trace_end_ns = tr.start_time_ns + tr.duration_ns;
+                let after_start = start_ns.is_none_or(|st| trace_end_ns >= st);
+                let before_end = end_ns.is_none_or(|en| tr.start_time_ns <= en);
+                after_start && before_end
+            });
+        }
+
+        recent.truncate(limit);
+
+        let traces: Vec<Value> = recent
+            .iter()
+            .map(|tr| {
+                json!({
+                    "traceID": hex_encode(&tr.trace_id),
+                    "rootServiceName": tr.root_service_name,
+                    "rootTraceName": tr.root_span_name,
+                    "startTimeUnixNano": tr.start_time_ns.to_string(),
+                    "durationMs": tr.duration_ns / 1_000_000,
+                    "spanSets": [],
+                })
+            })
+            .collect();
+
+        return (StatusCode::OK, Json(json!({"traces": traces})));
     }
 
     let expr = match parse_traceql(&q) {
@@ -46,20 +101,16 @@ pub async fn search(
         }
     };
 
-    let store = state.trace_store.read();
     let results = evaluate_traceql(&expr, &store);
 
-    // Convert start/end from epoch seconds to nanoseconds for filtering.
-    let start_ns = params.start.map(|s| s as i64 * 1_000_000_000);
-    let end_ns = params.end.map(|e| e as i64 * 1_000_000_000);
-
-    // Filter traces: keep only those with at least one span whose start_time_unix_nano
-    // falls within [start_ns, end_ns].
+    // Filter traces by time range: keep only those with at least one span
+    // whose time window overlaps [start_ns, end_ns].
     let results: Vec<_> = results
         .into_iter()
         .filter(|r| {
             r.matched_spans.iter().any(|s| {
-                let after_start = start_ns.is_none_or(|st| s.start_time_ns >= st);
+                let span_end = s.start_time_ns + s.duration_ns;
+                let after_start = start_ns.is_none_or(|st| span_end >= st);
                 let before_end = end_ns.is_none_or(|en| s.start_time_ns <= en);
                 after_start && before_end
             })
@@ -72,7 +123,7 @@ pub async fn search(
             let trace_id = hex::encode_upper(&r.trace_id);
             // Find the actual root span from the trace store, not the first matched span
             let root_info = store.trace_result(&r.trace_id);
-            let (root_service, root_name, start_ns, duration_ns) = match &root_info {
+            let (root_service, root_name, root_start_ns, root_duration_ns) = match &root_info {
                 Some(tr) => (
                     tr.root_service_name.as_str(),
                     tr.root_span_name.as_str(),
@@ -94,8 +145,8 @@ pub async fn search(
                 "traceID": trace_id.to_lowercase(),
                 "rootServiceName": root_service,
                 "rootTraceName": root_name,
-                "startTimeUnixNano": start_ns.to_string(),
-                "durationMs": duration_ns / 1_000_000,
+                "startTimeUnixNano": root_start_ns.to_string(),
+                "durationMs": root_duration_ns / 1_000_000,
                 "spanSets": [{
                     "spans": r.matched_spans.iter().map(|s| {
                         json!({

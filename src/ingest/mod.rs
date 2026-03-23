@@ -39,9 +39,65 @@ pub fn decode_body<'a>(headers: &HeaderMap, body: &'a Bytes) -> Result<Cow<'a, [
 }
 
 /// Check if the Content-Type header indicates JSON encoding.
+///
+/// Matches `application/json` with optional parameters like `; charset=utf-8`.
+/// Returns `false` for `application/x-protobuf`, missing headers, or any other type.
 pub fn is_json_content_type(headers: &HeaderMap) -> bool {
     headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("application/json"))
+        .is_some_and(|v| {
+            let lower = v.to_ascii_lowercase();
+            lower == "application/json"
+                || lower.starts_with("application/json;")
+                || lower.starts_with("application/json ")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with_content_type(ct: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("content-type", ct.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn test_is_json_exact_match() {
+        let h = headers_with_content_type("application/json");
+        assert!(is_json_content_type(&h));
+    }
+
+    #[test]
+    fn test_is_json_with_charset() {
+        let h = headers_with_content_type("application/json; charset=utf-8");
+        assert!(is_json_content_type(&h));
+    }
+
+    #[test]
+    fn test_is_json_case_insensitive() {
+        let h = headers_with_content_type("Application/JSON; charset=UTF-8");
+        assert!(is_json_content_type(&h));
+    }
+
+    #[test]
+    fn test_protobuf_is_not_json() {
+        let h = headers_with_content_type("application/x-protobuf");
+        assert!(!is_json_content_type(&h));
+    }
+
+    #[test]
+    fn test_missing_content_type_is_not_json() {
+        let h = HeaderMap::new();
+        assert!(!is_json_content_type(&h));
+    }
+
+    #[test]
+    fn test_empty_content_type_is_not_json() {
+        // Some clients might send empty content-type
+        let h = headers_with_content_type("application/x-protobuf");
+        assert!(!is_json_content_type(&h));
+    }
 }

@@ -1542,7 +1542,7 @@ async fn test_e2e_smoke_all_features() {
     let scalar_val: f64 = json["data"]["result"][1].as_str().unwrap().parse().unwrap();
     assert!((scalar_val - 2.0).abs() < 0.01);
 
-    // --- Grafana compat: GET /api/search (no q param) ---
+    // --- Grafana compat: GET /api/search (no q param) returns recent traces ---
     let json: Value = client
         .get(format!("{}/api/search", base))
         .send()
@@ -1551,7 +1551,10 @@ async fn test_e2e_smoke_all_features() {
         .json()
         .await
         .unwrap();
-    assert!(json["traces"].as_array().unwrap().is_empty());
+    assert!(
+        json["traces"].as_array().is_some(),
+        "GET /api/search with no q should return a traces array (may be non-empty if traces were ingested earlier in this test)"
+    );
 
     // --- LogQL parse error with hint ---
     let resp = client
