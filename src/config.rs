@@ -81,7 +81,11 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
     };
 
     let n: f64 = num_str.trim().parse().ok()?;
-    Some(Duration::from_secs_f64(n * multiplier as f64))
+    let total_secs = n * multiplier as f64;
+    if !total_secs.is_finite() || total_secs < 0.0 || total_secs > u64::MAX as f64 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(total_secs))
 }
 
 #[cfg(test)]
@@ -96,5 +100,23 @@ mod tests {
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
         assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn test_parse_duration_negative() {
+        assert_eq!(parse_duration("-1s"), None);
+        assert_eq!(parse_duration("-5m"), None);
+    }
+
+    #[test]
+    fn test_parse_duration_zero() {
+        assert_eq!(parse_duration("0s"), Some(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn test_parse_duration_huge_finite() {
+        // Should return None, not panic
+        assert_eq!(parse_duration("1e20s"), None);
+        assert_eq!(parse_duration("999999999999999999999s"), None);
     }
 }

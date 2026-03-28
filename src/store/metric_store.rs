@@ -104,28 +104,20 @@ impl MetricStore {
             });
 
         let was_empty = series.samples.is_empty();
-        let prev_last_ts = series.samples.last().map(|s| s.timestamp_ms);
         for sample in samples {
             series.samples.push(sample);
         }
         self.total_samples += sample_count;
 
-        // Maintain sorted order for partition_point correctness
-        if was_empty {
-            // First batch: check if it's already sorted
-            if !series
+        // Maintain sorted order for partition_point correctness.
+        if sample_count > 1 || !was_empty {
+            let needs_sort = !series
                 .samples
                 .windows(2)
-                .all(|w| w[0].timestamp_ms <= w[1].timestamp_ms)
-            {
+                .all(|w| w[0].timestamp_ms <= w[1].timestamp_ms);
+            if needs_sort {
                 series.samples.sort_by_key(|s| s.timestamp_ms);
             }
-        } else if let Some(prev_ts) = prev_last_ts
-            && series.samples[series.samples.len() - sample_count..]
-                .iter()
-                .any(|s| s.timestamp_ms < prev_ts)
-        {
-            series.samples.sort_by_key(|s| s.timestamp_ms);
         }
 
         // Only update indexes for new series
@@ -833,5 +825,44 @@ mod tests {
         assert!(!store.label_names().is_empty());
         store.evict_before(2000);
         assert!(store.label_names().is_empty());
+    }
+
+    #[test]
+    fn test_internally_unsorted_batch_after_tail() {
+        let mut store = MetricStore::new();
+        store.ingest_samples(
+            "cpu",
+            vec![("host".into(), "a".into())],
+            vec![Sample {
+                timestamp_ms: 100,
+                value: 1.0,
+            }],
+        );
+        // Append internally unsorted batch — all > 100
+        store.ingest_samples(
+            "cpu",
+            vec![("host".into(), "a".into())],
+            vec![
+                Sample {
+                    timestamp_ms: 300,
+                    value: 3.0,
+                },
+                Sample {
+                    timestamp_ms: 200,
+                    value: 2.0,
+                },
+            ],
+        );
+        // Verify sorted
+        for series in store.series.values() {
+            for w in series.samples.windows(2) {
+                assert!(
+                    w[0].timestamp_ms <= w[1].timestamp_ms,
+                    "samples must be sorted: {} > {}",
+                    w[0].timestamp_ms,
+                    w[1].timestamp_ms
+                );
+            }
+        }
     }
 }

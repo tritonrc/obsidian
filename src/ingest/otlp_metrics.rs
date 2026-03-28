@@ -60,7 +60,9 @@ pub async fn metrics_handler(
 
         for scope_metrics in &resource_metrics.scope_metrics {
             for metric in &scope_metrics.metrics {
-                let metric_name = &metric.name;
+                // Normalize OTLP metric names: dots to underscores for PromQL compatibility.
+                // OTLP uses dots (e.g. http.server.duration), PromQL grammar rejects dots.
+                let metric_name = metric.name.replace('.', "_");
 
                 match &metric.data {
                     Some(Data::Gauge(gauge)) => {
@@ -140,7 +142,10 @@ pub async fn metrics_handler(
                         }
                     }
                     Some(Data::ExponentialHistogram(_)) => {
-                        // ExponentialHistogram is not supported — silently skip.
+                        tracing::warn!(
+                            metric = metric_name.as_str(),
+                            "skipping ExponentialHistogram — not supported"
+                        );
                     }
                     Some(Data::Summary(summary)) => {
                         for dp in &summary.data_points {

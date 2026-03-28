@@ -224,7 +224,13 @@ fn parse_conditions(input: &str) -> IResult<&str, (Vec<SpanCondition>, Vec<Logic
                     conditions.push(cond);
                     input = rest;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    // Trailing logical operator with no RHS condition is a parse error
+                    return Err(nom::Err::Failure(nom::error::Error::new(
+                        rest,
+                        nom::error::ErrorKind::Tag,
+                    )));
+                }
             }
         } else {
             break;
@@ -714,5 +720,17 @@ mod tests {
             }
             _ => panic!("expected Pipeline"),
         }
+    }
+
+    #[test]
+    fn test_trailing_and_is_parse_error() {
+        let result = parse_traceql("{ status = error && }");
+        assert!(result.is_err(), "trailing && should be a parse error");
+    }
+
+    #[test]
+    fn test_trailing_or_is_parse_error() {
+        let result = parse_traceql("{ status = error || }");
+        assert!(result.is_err(), "trailing || should be a parse error");
     }
 }

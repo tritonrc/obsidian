@@ -85,7 +85,14 @@ pub fn evaluate_logql(
             inner,
             range,
         } => {
-            let step = step_ns.unwrap_or(range.as_nanos() as i64);
+            let step = step_ns.unwrap_or_else(|| {
+                let ns = range.as_nanos();
+                if ns > i64::MAX as u128 {
+                    i64::MAX
+                } else {
+                    ns as i64
+                }
+            });
             evaluate_metric_query(function, inner, *range, store, start_ns, end_ns, step)
         }
     }
@@ -149,14 +156,28 @@ fn evaluate_metric_query(
                         values.iter().sum::<f64>() / values.len() as f64
                     }
                 }
-                MetricFunc::MinOverTime => filtered
-                    .iter()
-                    .filter_map(|e| e.line.trim().parse::<f64>().ok())
-                    .fold(f64::INFINITY, f64::min),
-                MetricFunc::MaxOverTime => filtered
-                    .iter()
-                    .filter_map(|e| e.line.trim().parse::<f64>().ok())
-                    .fold(f64::NEG_INFINITY, f64::max),
+                MetricFunc::MinOverTime => {
+                    let vals: Vec<f64> = filtered
+                        .iter()
+                        .filter_map(|e| e.line.trim().parse::<f64>().ok())
+                        .collect();
+                    if vals.is_empty() {
+                        t += step_ns;
+                        continue;
+                    }
+                    vals.into_iter().fold(f64::INFINITY, f64::min)
+                }
+                MetricFunc::MaxOverTime => {
+                    let vals: Vec<f64> = filtered
+                        .iter()
+                        .filter_map(|e| e.line.trim().parse::<f64>().ok())
+                        .collect();
+                    if vals.is_empty() {
+                        t += step_ns;
+                        continue;
+                    }
+                    vals.into_iter().fold(f64::NEG_INFINITY, f64::max)
+                }
             };
 
             samples.push((t, value));

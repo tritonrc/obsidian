@@ -69,12 +69,23 @@ pub async fn push_handler(
     let request = if content_type.contains("application/x-protobuf")
         || content_type.contains("application/x-snappy")
     {
-        // Snappy-compressed JSON path
+        // Snappy-compressed JSON path.
+        // Loki clients typically send snappy-compressed JSON as application/x-protobuf.
+        // Native Loki protobuf is NOT supported — if snappy-JSON decode fails,
+        // report that clearly.
         match decode_snappy_json(&body) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("failed to decode protobuf push: {}", e);
-                return StatusCode::BAD_REQUEST.into_response();
+                tracing::warn!(
+                    "failed to decode Loki push (expected snappy-compressed JSON): {}",
+                    e
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("failed to decode Loki push: {}. Note: native Loki protobuf is not supported, use JSON or snappy-compressed JSON.", e)
+                    })),
+                ).into_response();
             }
         }
     } else {
@@ -106,6 +117,12 @@ fn decode_snappy_json(body: &[u8]) -> Result<LokiPushRequest, anyhow::Error> {
     let decompressed = snap::raw::Decoder::new()
         .decompress_vec(body)
         .map_err(|e| anyhow::anyhow!("snappy decompress failed: {}", e))?;
+
+    if decompressed.len() > super::MAX_DECOMPRESSED_SIZE {
+        return Err(anyhow::anyhow!(
+            "decompressed body exceeds maximum size of 64 MiB"
+        ));
+    }
 
     serde_json::from_slice(&decompressed)
         .map_err(|e| anyhow::anyhow!("failed to parse decompressed push: {}", e))

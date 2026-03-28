@@ -69,10 +69,16 @@ pub async fn logs_handler(
                     None => String::new(),
                 };
 
-                let entry = LogEntry {
-                    timestamp_ns: log_record.time_unix_nano as i64,
-                    line,
+                let timestamp_ns = if log_record.time_unix_nano == 0 {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as i64
+                } else {
+                    log_record.time_unix_nano as i64
                 };
+
+                let entry = LogEntry { timestamp_ns, line };
 
                 prepared.push((labels, vec![entry]));
             }
@@ -80,11 +86,13 @@ pub async fn logs_handler(
     }
 
     // Acquire write lock and ingest.
+    let entry_count = prepared.len();
     let mut store = state.log_store.write();
     for (labels, entries) in prepared {
         store.ingest_stream(labels, entries);
     }
 
+    tracing::debug!(entries = entry_count, "ingested OTLP logs");
     StatusCode::NO_CONTENT
 }
 

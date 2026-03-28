@@ -13,12 +13,19 @@ pub mod otlp_metrics;
 pub mod otlp_traces;
 pub mod remote_write;
 
+/// Maximum decompressed body size: 64 MiB.
+pub const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
+
 /// Errors that can occur when decoding an ingestion request body.
 #[derive(Debug, thiserror::Error)]
 pub enum IngestError {
     /// Gzip decompression of the request body failed.
     #[error("gzip decompression failed: {0}")]
     GzipDecompression(#[from] std::io::Error),
+
+    /// Decompressed body exceeds the maximum allowed size.
+    #[error("decompressed body exceeds maximum size of 64 MiB")]
+    PayloadTooLarge,
 }
 
 /// Decode a request body, decompressing gzip if the `content-encoding` header indicates it.
@@ -29,9 +36,14 @@ pub fn decode_body<'a>(headers: &HeaderMap, body: &'a Bytes) -> Result<Cow<'a, [
         .is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
 
     if is_gzip {
-        let mut decoder = flate2::read::GzDecoder::new(body.as_ref());
+        let decoder = flate2::read::GzDecoder::new(body.as_ref());
         let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)?;
+        decoder
+            .take(MAX_DECOMPRESSED_SIZE as u64 + 1)
+            .read_to_end(&mut decompressed)?;
+        if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+            return Err(IngestError::PayloadTooLarge);
+        }
         Ok(Cow::Owned(decompressed))
     } else {
         Ok(Cow::Borrowed(body.as_ref()))
@@ -99,5 +111,11 @@ mod tests {
         // Some clients might send empty content-type
         let h = headers_with_content_type("application/x-protobuf");
         assert!(!is_json_content_type(&h));
+    }
+
+    #[test]
+    fn test_max_decompressed_size_is_64_mib() {
+        assert_eq!(MAX_DECOMPRESSED_SIZE, 64 * 1024 * 1024);
+        assert_eq!(MAX_DECOMPRESSED_SIZE, 67_108_864);
     }
 }

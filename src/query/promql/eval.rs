@@ -153,7 +153,7 @@ fn eval_vector_selector(
     if instant || step_ms == 0 {
         // Instant query: find latest sample for each series at or before end_ms
         let lookback_ms = 5 * 60 * 1000; // 5-minute lookback
-        let forward_buffer_ms = 1000; // 1s forward tolerance for timestamp rounding
+        let forward_buffer_ms = 1000; // 1s forward tolerance for OTLP/PromQL timestamp rounding
         let effective_end = end_ms - offset_ms;
         for sid in &series_ids {
             let samples = store.get_samples(
@@ -619,18 +619,38 @@ fn compute_rate_like(func_name: &str, samples: &[Sample], range_ms: i64) -> Opti
     }
     let first = samples.first()?;
     let last = samples.last()?;
-    let value_delta = last.value - first.value;
 
     match func_name {
-        "rate" => {
-            let time_delta_s = range_ms as f64 / 1000.0;
-            if time_delta_s > 0.0 {
-                Some(value_delta / time_delta_s)
+        "rate" | "increase" => {
+            // Counter reset detection: accumulate increases, treating decreases as resets
+            let mut total_increase = 0.0;
+            for i in 1..samples.len() {
+                let delta = samples[i].value - samples[i - 1].value;
+                if delta >= 0.0 {
+                    total_increase += delta;
+                } else {
+                    // Counter reset: assume it went to 0 and then to current value
+                    total_increase += samples[i].value;
+                }
+            }
+
+            let sample_duration_s = (last.timestamp_ms - first.timestamp_ms) as f64 / 1000.0;
+            if sample_duration_s <= 0.0 {
+                return None;
+            }
+
+            if func_name == "increase" {
+                // Extrapolate increase to cover the full range
+                Some(total_increase * (range_ms as f64 / 1000.0) / sample_duration_s)
             } else {
-                None
+                // rate = per-second rate based on actual sample duration
+                Some(total_increase / sample_duration_s)
             }
         }
-        "increase" | "delta" => Some(value_delta),
+        "delta" => {
+            // delta: raw difference, no reset detection (gauge metric)
+            Some(last.value - first.value)
+        }
         "deriv" => {
             // Linear regression using centered x values for numerical stability.
             // slope = Σ((x_i - x_mean)*(y_i - y_mean)) / Σ((x_i - x_mean)^2)
@@ -661,7 +681,10 @@ fn compute_rate_like(func_name: &str, samples: &[Sample], range_ms: i64) -> Opti
                 let curr = &samples[samples.len() - 1];
                 let dt = (curr.timestamp_ms - prev.timestamp_ms) as f64 / 1000.0;
                 if dt > 0.0 {
-                    Some((curr.value - prev.value) / dt)
+                    let delta = curr.value - prev.value;
+                    // irate also needs reset detection on last two samples
+                    let increase = if delta >= 0.0 { delta } else { curr.value };
+                    Some(increase / dt)
                 } else {
                     None
                 }
@@ -986,6 +1009,7 @@ fn apply_binary_op(op: &str, l: f64, r: f64) -> f64 {
                 0.0
             }
         }
+        "^" => l.powf(r),
         _ => f64::NAN,
     }
 }
@@ -1432,9 +1456,10 @@ mod tests {
         match result {
             PromQLResult::InstantVector(series) => {
                 assert_eq!(series.len(), 1);
-                // Rate over 10s: (90-0)/10 = 9.0
+                // Samples span 0ms..9000ms (9s actual), increase = 90
+                // rate = 90 / 9s = 10.0
                 let rate = series[0].samples[0].1;
-                assert!((rate - 9.0).abs() < 0.01, "rate was {}", rate);
+                assert!((rate - 10.0).abs() < 0.01, "rate was {}", rate);
             }
             _ => panic!("expected InstantVector"),
         }
@@ -1645,5 +1670,79 @@ mod tests {
             }
             _ => panic!("expected InstantVector"),
         }
+    }
+
+    #[test]
+    fn test_rate_with_counter_reset() {
+        // Counter: 0, 10, 20, 5 (reset!), 15
+        let samples = vec![
+            Sample {
+                timestamp_ms: 1000,
+                value: 0.0,
+            },
+            Sample {
+                timestamp_ms: 2000,
+                value: 10.0,
+            },
+            Sample {
+                timestamp_ms: 3000,
+                value: 20.0,
+            },
+            Sample {
+                timestamp_ms: 4000,
+                value: 5.0,
+            }, // reset
+            Sample {
+                timestamp_ms: 5000,
+                value: 15.0,
+            },
+        ];
+        // Total increase = 10 + 10 + 5 + 10 = 35, over 4s = 8.75/s
+        let result = compute_rate_like("rate", &samples, 5000);
+        assert!(result.is_some());
+        let val = result.unwrap();
+        assert!(
+            (val - 8.75).abs() < 0.01,
+            "rate should be ~8.75, got {}",
+            val
+        );
+    }
+
+    #[test]
+    fn test_rate_no_reset() {
+        let samples = vec![
+            Sample {
+                timestamp_ms: 1000,
+                value: 0.0,
+            },
+            Sample {
+                timestamp_ms: 5000,
+                value: 100.0,
+            },
+        ];
+        // rate = 100 / 4s = 25/s
+        let result = compute_rate_like("rate", &samples, 5000);
+        assert!(result.is_some());
+        let val = result.unwrap();
+        assert!((val - 25.0).abs() < 0.01, "rate should be 25, got {}", val);
+    }
+
+    #[test]
+    fn test_irate_with_reset() {
+        let samples = vec![
+            Sample {
+                timestamp_ms: 1000,
+                value: 100.0,
+            },
+            Sample {
+                timestamp_ms: 2000,
+                value: 5.0,
+            }, // reset
+        ];
+        // irate: delta is negative (reset), so use curr.value = 5, dt = 1s -> 5/s
+        let result = compute_rate_like("irate", &samples, 2000);
+        assert!(result.is_some());
+        let val = result.unwrap();
+        assert!((val - 5.0).abs() < 0.01, "irate should be 5, got {}", val);
     }
 }

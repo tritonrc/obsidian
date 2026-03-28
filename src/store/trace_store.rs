@@ -185,63 +185,48 @@ impl TraceStore {
 
     /// Evict spans older than the given timestamp.
     pub fn evict_before(&mut self, cutoff_ns: i64) {
-        type EvictedEntry = (
-            [u8; 16],
-            FxHashSet<Spur>,
-            FxHashSet<Spur>,
-            FxHashSet<SpanStatus>,
-        );
-        let mut empty_traces: Vec<EvictedEntry> = Vec::new();
-        for (trace_id, spans) in &mut self.traces {
-            // Collect service/name spurs and statuses from spans being evicted before retain
-            let evicted_services: FxHashSet<Spur> = spans
-                .iter()
-                .filter(|s| s.start_time_ns < cutoff_ns)
-                .map(|s| s.service_name)
-                .collect();
-            let evicted_names: FxHashSet<Spur> = spans
-                .iter()
-                .filter(|s| s.start_time_ns < cutoff_ns)
-                .map(|s| s.name)
-                .collect();
-            let evicted_statuses: FxHashSet<SpanStatus> = spans
-                .iter()
-                .filter(|s| s.start_time_ns < cutoff_ns)
-                .map(|s| s.status)
-                .collect();
+        let mut empty_traces: Vec<[u8; 16]> = Vec::new();
+        let mut any_evicted = false;
 
+        for (trace_id, spans) in &mut self.traces {
             let before = spans.len();
             spans.retain(|s| s.start_time_ns >= cutoff_ns);
             let removed = before - spans.len();
-            self.total_spans = self.total_spans.saturating_sub(removed);
-            if spans.is_empty() {
-                empty_traces.push((*trace_id, evicted_services, evicted_names, evicted_statuses));
+            if removed > 0 {
+                self.total_spans = self.total_spans.saturating_sub(removed);
+                any_evicted = true;
+                if spans.is_empty() {
+                    empty_traces.push(*trace_id);
+                }
             }
         }
 
-        for (trace_id, services, names, statuses) in &empty_traces {
+        for trace_id in &empty_traces {
             self.traces.remove(trace_id);
-            for svc in services {
-                if let Some(set) = self.service_index.get_mut(svc) {
-                    set.remove(trace_id);
-                }
-            }
-            for name in names {
-                if let Some(set) = self.name_index.get_mut(name) {
-                    set.remove(trace_id);
-                }
-            }
-            for status in statuses {
-                if let Some(set) = self.status_index.get_mut(status) {
-                    set.remove(trace_id);
+        }
+
+        // Rebuild all indexes from surviving spans
+        if any_evicted {
+            self.service_index.clear();
+            self.name_index.clear();
+            self.status_index.clear();
+            for (trace_id, spans) in &self.traces {
+                for span in spans {
+                    self.service_index
+                        .entry(span.service_name)
+                        .or_default()
+                        .insert(*trace_id);
+                    self.name_index
+                        .entry(span.name)
+                        .or_default()
+                        .insert(*trace_id);
+                    self.status_index
+                        .entry(span.status)
+                        .or_default()
+                        .insert(*trace_id);
                 }
             }
         }
-
-        // Clean up empty index entries
-        self.service_index.retain(|_, v| !v.is_empty());
-        self.name_index.retain(|_, v| !v.is_empty());
-        self.status_index.retain(|_, v| !v.is_empty());
     }
 
     /// Build a TraceResult summary for a trace.
@@ -298,41 +283,51 @@ impl TraceStore {
         self.total_spans = 0;
     }
 
-    /// Clear all data belonging to a specific service.
+    /// Clear all spans belonging to a specific service, preserving other services' spans.
     pub fn clear_service(&mut self, service: &str) {
         let service_spur = match self.interner.get(service) {
             Some(s) => s,
             None => return,
         };
 
-        // Get trace IDs for this service
         let trace_ids: Vec<[u8; 16]> = match self.service_index.get(&service_spur) {
             Some(set) => set.iter().copied().collect(),
             None => return,
         };
 
         for trace_id in &trace_ids {
-            if let Some(spans) = self.traces.remove(trace_id) {
-                self.total_spans = self.total_spans.saturating_sub(spans.len());
-                // Clean up indexes
-                for span in &spans {
-                    if let Some(set) = self.service_index.get_mut(&span.service_name) {
-                        set.remove(trace_id);
-                    }
-                    if let Some(set) = self.name_index.get_mut(&span.name) {
-                        set.remove(trace_id);
-                    }
-                    if let Some(set) = self.status_index.get_mut(&span.status) {
-                        set.remove(trace_id);
-                    }
+            if let Some(spans) = self.traces.get_mut(trace_id) {
+                let before = spans.len();
+                spans.retain(|s| s.service_name != service_spur);
+                let removed = before - spans.len();
+                self.total_spans = self.total_spans.saturating_sub(removed);
+
+                if spans.is_empty() {
+                    self.traces.remove(trace_id);
                 }
             }
         }
 
-        // Clean up empty index entries
-        self.service_index.retain(|_, v| !v.is_empty());
-        self.name_index.retain(|_, v| !v.is_empty());
-        self.status_index.retain(|_, v| !v.is_empty());
+        // Rebuild all indexes from surviving spans
+        self.service_index.clear();
+        self.name_index.clear();
+        self.status_index.clear();
+        for (trace_id, spans) in &self.traces {
+            for span in spans {
+                self.service_index
+                    .entry(span.service_name)
+                    .or_default()
+                    .insert(*trace_id);
+                self.name_index
+                    .entry(span.name)
+                    .or_default()
+                    .insert(*trace_id);
+                self.status_index
+                    .entry(span.status)
+                    .or_default()
+                    .insert(*trace_id);
+            }
+        }
     }
 }
 
@@ -391,6 +386,7 @@ impl Default for TraceStore {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_span(
         interner: &mut Rodeo,
         trace_id: [u8; 16],
@@ -683,5 +679,113 @@ mod tests {
         let store = TraceStore::new();
         let recent = store.recent_traces(10);
         assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn test_clear_service_preserves_other_service_spans() {
+        let mut store = TraceStore::new();
+        let trace_id = [1u8; 16];
+
+        let svc_a = store.interner.get_or_intern("service-a");
+        let svc_b = store.interner.get_or_intern("service-b");
+        let name_a = store.interner.get_or_intern("span-a");
+        let name_b = store.interner.get_or_intern("span-b");
+
+        store.ingest_spans(vec![
+            Span {
+                trace_id,
+                span_id: [1u8; 8],
+                parent_span_id: None,
+                name: name_a,
+                service_name: svc_a,
+                start_time_ns: 1000,
+                duration_ns: 100,
+                status: SpanStatus::Ok,
+                attributes: SmallVec::new(),
+            },
+            Span {
+                trace_id,
+                span_id: [2u8; 8],
+                parent_span_id: Some([1u8; 8]),
+                name: name_b,
+                service_name: svc_b,
+                start_time_ns: 1050,
+                duration_ns: 50,
+                status: SpanStatus::Ok,
+                attributes: SmallVec::new(),
+            },
+        ]);
+
+        assert_eq!(store.total_spans, 2);
+
+        store.clear_service("service-a");
+
+        assert_eq!(
+            store.total_spans, 1,
+            "only service-a span should be removed"
+        );
+        let spans = store.get_trace(&trace_id);
+        assert!(spans.is_some(), "trace should still exist");
+        assert_eq!(spans.unwrap().len(), 1);
+        assert_eq!(spans.unwrap()[0].service_name, svc_b);
+
+        // service-a should be gone from index
+        assert!(!store.service_index.contains_key(&svc_a));
+        // service-b should still be in index
+        assert!(store.service_index.contains_key(&svc_b));
+    }
+
+    #[test]
+    fn test_evict_partial_cleans_stale_indexes() {
+        let mut store = TraceStore::new();
+        let trace_id = [1u8; 16];
+
+        let svc = store.interner.get_or_intern("my-svc");
+        let old_name = store.interner.get_or_intern("old-span");
+        let new_name = store.interner.get_or_intern("new-span");
+
+        store.ingest_spans(vec![
+            Span {
+                trace_id,
+                span_id: [1u8; 8],
+                parent_span_id: None,
+                name: old_name,
+                service_name: svc,
+                start_time_ns: 100,
+                duration_ns: 10,
+                status: SpanStatus::Error,
+                attributes: SmallVec::new(),
+            },
+            Span {
+                trace_id,
+                span_id: [2u8; 8],
+                parent_span_id: Some([1u8; 8]),
+                name: new_name,
+                service_name: svc,
+                start_time_ns: 1000,
+                duration_ns: 10,
+                status: SpanStatus::Ok,
+                attributes: SmallVec::new(),
+            },
+        ]);
+
+        // Evict spans older than 500
+        store.evict_before(500);
+
+        assert_eq!(store.total_spans, 1);
+        // Error status should be gone from index
+        let error_traces = store.status_index.get(&SpanStatus::Error);
+        assert!(
+            error_traces.is_none() || error_traces.unwrap().is_empty(),
+            "error status should be removed after partial eviction"
+        );
+        // Old span name should be gone
+        let old_name_traces = store.name_index.get(&old_name);
+        assert!(
+            old_name_traces.is_none() || old_name_traces.unwrap().is_empty(),
+            "old span name should be removed after partial eviction"
+        );
+        // New span should still be indexed
+        assert!(store.name_index.contains_key(&new_name));
     }
 }

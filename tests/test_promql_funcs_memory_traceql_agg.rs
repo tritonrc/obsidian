@@ -174,9 +174,11 @@ async fn test_promql_offset_modifier_looks_back_one_hour() {
 
     assert_eq!(json["status"], "success");
     let value = single_vector_value(&json);
+    // Samples at 60s (10.0) and 120s (70.0): increase = 60, duration = 60s
+    // rate = 60 / 60 = 1.0/s
     assert!(
-        (value - 0.2).abs() < 0.000_001,
-        "expected offset rate to use the older window, got {value}"
+        (value - 1.0).abs() < 0.000_001,
+        "expected offset rate = 1.0/s (actual sample duration), got {value}"
     );
 }
 

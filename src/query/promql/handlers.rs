@@ -15,6 +15,9 @@ use crate::store::log_store::{LabelMatchOp, LabelMatcher};
 /// Hint included in PromQL parse error responses to help agents construct valid queries.
 const PROMQL_HINT: &str = "Example: rate(http_requests_total[5m])";
 
+/// Maximum number of steps allowed in a range query. Matches Prometheus default of 11,000.
+const MAX_QUERY_STEPS: i64 = 11_000;
+
 #[derive(Debug, Deserialize)]
 pub struct InstantQueryParams {
     pub query: String,
@@ -149,6 +152,16 @@ async fn query_range_inner(
             StatusCode::BAD_REQUEST,
             Json(
                 json!({"status": "error", "errorType": "bad_data", "error": "step must be positive"}),
+            ),
+        );
+    }
+
+    let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+    if num_steps >= MAX_QUERY_STEPS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"status": "error", "errorType": "bad_data", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)}),
             ),
         );
     }
@@ -379,5 +392,90 @@ fn classify_to_ms(n: i64) -> i64 {
         n // already milliseconds
     } else {
         n.saturating_mul(1000) // seconds -> ms
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_max_query_steps_constant() {
+        assert_eq!(MAX_QUERY_STEPS, 11_000);
+    }
+
+    #[test]
+    fn test_step_count_within_limit() {
+        // 3600000ms range / 1000ms step = 3600 steps, under the 11000 cap
+        let start_ms: i64 = 1_700_000_000_000;
+        let end_ms: i64 = start_ms + 3_600_000;
+        let step_ms: i64 = 1_000;
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert_eq!(num_steps, 3600);
+        assert!(num_steps < MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_exceeds_limit() {
+        // 11001000ms range / 1ms step = 11_001_000 steps, way over the cap
+        let start_ms: i64 = 1_700_000_000_000;
+        let end_ms: i64 = start_ms + 11_001_000;
+        let step_ms: i64 = 1;
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert!(num_steps >= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_exactly_at_limit() {
+        // Exactly 11000 steps should be rejected (off-by-one: eval loop is inclusive)
+        let start_ms: i64 = 1_700_000_000_000;
+        let step_ms: i64 = 1_000;
+        let end_ms: i64 = start_ms + step_ms * MAX_QUERY_STEPS;
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert_eq!(num_steps, MAX_QUERY_STEPS);
+        assert!(num_steps >= MAX_QUERY_STEPS); // rejected
+
+        // 10999 steps should be allowed
+        let end_ms_ok: i64 = start_ms + step_ms * (MAX_QUERY_STEPS - 1);
+        let num_steps_ok = end_ms_ok.saturating_sub(start_ms).max(0) / step_ms;
+        assert_eq!(num_steps_ok, MAX_QUERY_STEPS - 1);
+        assert!(num_steps_ok < MAX_QUERY_STEPS); // allowed
+    }
+
+    #[test]
+    fn test_step_count_one_over_limit() {
+        // 11001 steps should be rejected
+        let start_ms: i64 = 1_700_000_000_000;
+        let step_ms: i64 = 1_000;
+        let end_ms: i64 = start_ms + step_ms * (MAX_QUERY_STEPS + 1);
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert_eq!(num_steps, MAX_QUERY_STEPS + 1);
+        assert!(num_steps >= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_overflow_protection() {
+        // Extreme timestamps: saturating_sub prevents overflow
+        let start_ms: i64 = -1_000_000_000_000;
+        let end_ms: i64 = i64::MAX;
+        let step_ms: i64 = 1_000;
+        // Without saturating_sub, this would overflow
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert!(num_steps >= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_parse_timestamp_ms_seconds() {
+        assert_eq!(parse_timestamp_ms("1700000000"), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn test_parse_timestamp_ms_milliseconds() {
+        assert_eq!(parse_timestamp_ms("1700000000000"), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn test_parse_timestamp_ms_float_seconds() {
+        assert_eq!(parse_timestamp_ms("1700000000.5"), Some(1_700_000_000_500));
     }
 }

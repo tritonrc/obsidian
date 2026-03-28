@@ -109,28 +109,22 @@ impl LogStore {
         });
 
         let was_empty = stream.entries.is_empty();
-        let prev_last_ts = stream.entries.last().map(|e| e.timestamp_ns);
         for entry in entries {
             stream.entries.push(entry);
         }
         self.total_entries += entry_count;
 
-        // Maintain sorted order for partition_point correctness
-        if was_empty {
-            // First batch: check if it's already sorted
-            if !stream
+        // Maintain sorted order for partition_point correctness.
+        // Always check the full vec after appending — an internally unsorted batch
+        // where all timestamps are >= prev_last_ts would otherwise be missed.
+        if entry_count > 1 || !was_empty {
+            let needs_sort = !stream
                 .entries
                 .windows(2)
-                .all(|w| w[0].timestamp_ns <= w[1].timestamp_ns)
-            {
+                .all(|w| w[0].timestamp_ns <= w[1].timestamp_ns);
+            if needs_sort {
                 stream.entries.sort_by_key(|e| e.timestamp_ns);
             }
-        } else if let Some(prev_ts) = prev_last_ts
-            && stream.entries[stream.entries.len() - entry_count..]
-                .iter()
-                .any(|e| e.timestamp_ns < prev_ts)
-        {
-            stream.entries.sort_by_key(|e| e.timestamp_ns);
         }
 
         // Only update inverted index for new streams
@@ -765,5 +759,42 @@ mod tests {
         store.evict_before(2000);
         assert!(store.label_names().is_empty());
         assert!(store.get_label_values("service").is_empty());
+    }
+
+    #[test]
+    fn test_internally_unsorted_batch_after_tail() {
+        let mut store = LogStore::new();
+        store.ingest_stream(
+            vec![("service".into(), "test".into())],
+            vec![LogEntry {
+                timestamp_ns: 100,
+                line: "a".into(),
+            }],
+        );
+        // Append internally unsorted batch — all > 100
+        store.ingest_stream(
+            vec![("service".into(), "test".into())],
+            vec![
+                LogEntry {
+                    timestamp_ns: 300,
+                    line: "c".into(),
+                },
+                LogEntry {
+                    timestamp_ns: 200,
+                    line: "b".into(),
+                },
+            ],
+        );
+        // Verify sorted
+        for stream in store.streams.values() {
+            for w in stream.entries.windows(2) {
+                assert!(
+                    w[0].timestamp_ns <= w[1].timestamp_ns,
+                    "entries must be sorted: {} > {}",
+                    w[0].timestamp_ns,
+                    w[1].timestamp_ns
+                );
+            }
+        }
     }
 }
