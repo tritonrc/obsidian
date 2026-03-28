@@ -234,9 +234,36 @@ pub async fn label_values(
 
 fn format_logql_result(result: LogQLResult, limit: usize) -> Value {
     match result {
-        LogQLResult::Streams(streams) => {
+        LogQLResult::Streams(mut streams) => {
+            // Apply limit globally across all streams, not per-stream.
+            // Collect all (stream_idx, timestamp, line) tuples, sort by timestamp
+            // descending (newest first), take `limit`, then redistribute.
+            let total_entries: usize = streams.iter().map(|s| s.entries.len()).sum();
+            if total_entries > limit {
+                let mut all: Vec<(usize, i64, String)> = streams
+                    .iter_mut()
+                    .enumerate()
+                    .flat_map(|(idx, sr)| {
+                        sr.entries
+                            .drain(..)
+                            .map(move |(ts, line)| (idx, ts, line))
+                    })
+                    .collect();
+                all.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+                all.truncate(limit);
+                // Put entries back into their streams
+                for (idx, ts, line) in all {
+                    streams[idx].entries.push((ts, line));
+                }
+                // Re-sort each stream's entries by timestamp ascending
+                for sr in &mut streams {
+                    sr.entries.sort_by_key(|(ts, _)| *ts);
+                }
+            }
+
             let result_arr: Vec<Value> = streams
                 .into_iter()
+                .filter(|sr| !sr.entries.is_empty())
                 .map(|sr| {
                     let labels_map: serde_json::Map<String, Value> = sr
                         .labels
@@ -246,7 +273,6 @@ fn format_logql_result(result: LogQLResult, limit: usize) -> Value {
                     let values: Vec<Value> = sr
                         .entries
                         .into_iter()
-                        .take(limit)
                         .map(|(ts, line)| json!([ts.to_string(), line]))
                         .collect();
                     json!({
