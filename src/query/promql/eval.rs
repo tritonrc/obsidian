@@ -876,6 +876,25 @@ fn eval_binary(
     step_ms: i64,
     instant: bool,
 ) -> Result<PromQLResult, PromQLError> {
+    // Reject unsupported binary modifiers explicitly instead of silently ignoring them
+    if let Some(modifier) = &bin.modifier {
+        if modifier.matching.is_some() {
+            return Err(PromQLError::Unsupported(
+                "binary expression modifiers on()/ignoring() are not yet supported".into(),
+            ));
+        }
+        match &modifier.card {
+            promql_parser::parser::VectorMatchCardinality::ManyToOne(_)
+            | promql_parser::parser::VectorMatchCardinality::OneToMany(_) => {
+                return Err(PromQLError::Unsupported(
+                    "binary expression modifiers group_left/group_right are not yet supported"
+                        .into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     let lhs = eval_expr(&bin.lhs, store, start_ms, end_ms, step_ms, instant)?;
     let rhs = eval_expr(&bin.rhs, store, start_ms, end_ms, step_ms, instant)?;
 
