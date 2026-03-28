@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use promql_parser::label::{MatchOp as PromMatchOp, Matchers};
 use promql_parser::parser::{
-    self, AggregateExpr, BinaryExpr, Call, Expr, LabelModifier, MatrixSelector, NumberLiteral,
-    Offset, ParenExpr, StringLiteral, UnaryExpr, VectorSelector,
+    self, AggregateExpr, AtModifier, BinaryExpr, Call, Expr, LabelModifier, MatrixSelector,
+    NumberLiteral, Offset, ParenExpr, StringLiteral, UnaryExpr, VectorSelector,
 };
 use regex::Regex;
 use rustc_hash::FxHashMap;
@@ -22,6 +22,24 @@ fn offset_to_ms(offset: &Option<Offset>) -> i64 {
         Some(Offset::Pos(dur)) => dur.as_millis() as i64,
         Some(Offset::Neg(dur)) => -(dur.as_millis() as i64),
         None => 0,
+    }
+}
+
+/// Convert an optional `AtModifier` to a fixed evaluation timestamp in milliseconds.
+/// `Start` and `End` resolve to the query's start/end respectively.
+/// `At(SystemTime)` resolves to an absolute timestamp.
+fn at_to_ms(at: &Option<AtModifier>, start_ms: i64, end_ms: i64) -> Option<i64> {
+    match at {
+        Some(AtModifier::Start) => Some(start_ms),
+        Some(AtModifier::End) => Some(end_ms),
+        Some(AtModifier::At(time)) => {
+            let ms = time
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            Some(ms)
+        }
+        None => None,
     }
 }
 
@@ -147,6 +165,8 @@ fn eval_vector_selector(
     }
     let series_ids = store.select_series(&matchers);
     let offset_ms = offset_to_ms(&vs.offset);
+    // @ modifier pins evaluation to a fixed timestamp
+    let at_ms = at_to_ms(&vs.at, start_ms, end_ms);
 
     let mut results = Vec::new();
 
@@ -154,7 +174,8 @@ fn eval_vector_selector(
         // Instant query: find latest sample for each series at or before end_ms
         let lookback_ms = 5 * 60 * 1000; // 5-minute lookback
         let forward_buffer_ms = 1000; // 1s forward tolerance for OTLP/PromQL timestamp rounding
-        let effective_end = end_ms - offset_ms;
+        let eval_time = at_ms.unwrap_or(end_ms);
+        let effective_end = eval_time - offset_ms;
         for sid in &series_ids {
             let samples = store.get_samples(
                 *sid,
@@ -178,7 +199,8 @@ fn eval_vector_selector(
             let mut series_samples = Vec::new();
             let mut t = start_ms;
             while t <= end_ms {
-                let effective_t = t - offset_ms;
+                let eval_time = at_ms.unwrap_or(t);
+                let effective_t = eval_time - offset_ms;
                 let samples = store.get_samples(*sid, effective_t - lookback_ms, effective_t);
                 if let Some(last) = samples.last() {
                     series_samples.push((t, last.value));
@@ -217,7 +239,8 @@ fn eval_matrix_selector(
     let series_ids = store.select_series(&matchers);
     let range_ms = ms.range.as_millis() as i64;
     let offset_ms = offset_to_ms(&vs.offset);
-    let effective_end = end_ms - offset_ms;
+    let eval_time = at_to_ms(&vs.at, _start_ms, end_ms).unwrap_or(end_ms);
+    let effective_end = eval_time - offset_ms;
 
     let mut results = Vec::new();
     for sid in &series_ids {
