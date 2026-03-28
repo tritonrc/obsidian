@@ -24,10 +24,24 @@ pub struct DiagnoseParams {
     pub service: Option<String>,
 }
 
+/// Return the current wall-clock time in nanoseconds since the Unix epoch.
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
+
+/// One hour in nanoseconds — the default lookback window for log scans.
+const ONE_HOUR_NS: i64 = 3_600 * 1_000_000_000;
+
 /// Compute a simplified health score and top issue for a service.
 /// Returns (health_score, top_issue).
 fn compute_service_health(state: &SharedState, service: &str) -> (f64, String) {
-    // --- Error rate from logs ---
+    let now = now_ns();
+    let lookback_start = now.saturating_sub(ONE_HOUR_NS);
+
+    // --- Error rate from logs (bounded to last 1 hour) ---
     let error_rate_pct = {
         let store = state.log_store.read();
         let all_matchers = vec![LabelMatcher {
@@ -38,9 +52,12 @@ fn compute_service_health(state: &SharedState, service: &str) -> (f64, String) {
         let all_stream_ids = store.query_streams(&all_matchers);
         let total: usize = all_stream_ids
             .iter()
-            .map(|sid| store.get_entries(*sid, 0, i64::MAX).len())
+            .map(|sid| store.get_entries(*sid, lookback_start, now).len())
             .sum();
 
+        // Error streams are a subset — filter from already-queried all_stream_ids
+        // is not possible because query_streams also filters by label, but we can
+        // query once and reuse the IDs.
         let error_matchers = vec![
             LabelMatcher {
                 name: "service".into(),
@@ -56,7 +73,7 @@ fn compute_service_health(state: &SharedState, service: &str) -> (f64, String) {
         let error_stream_ids = store.query_streams(&error_matchers);
         let error_count: usize = error_stream_ids
             .iter()
-            .map(|sid| store.get_entries(*sid, 0, i64::MAX).len())
+            .map(|sid| store.get_entries(*sid, lookback_start, now).len())
             .sum();
 
         if total > 0 {
@@ -180,10 +197,26 @@ fn diagnose_global(state: &SharedState) -> axum::response::Response {
 
 /// Return a detailed health assessment for a single service.
 fn diagnose_service(state: &SharedState, service: &str) -> axum::response::Response {
-    // --- Recent error logs ---
-    let recent_errors = {
+    let now = now_ns();
+    let lookback_start = now.saturating_sub(ONE_HOUR_NS);
+    let five_min_ns: i64 = 5 * 60 * 1_000_000_000;
+
+    // --- All log data in a single lock acquisition ---
+    // We query streams once for all-service and once for error-service,
+    // then reuse those cached stream IDs for error_rate, recent_errors, and error_trend.
+    let (error_rate_pct, recent_errors, current_5m, previous_5m) = {
         let store = state.log_store.read();
-        let matchers = vec![
+
+        // Query all streams for this service (cached)
+        let all_matchers = vec![LabelMatcher {
+            name: "service".into(),
+            op: LabelMatchOp::Eq,
+            value: service.to_string(),
+        }];
+        let all_stream_ids = store.query_streams(&all_matchers);
+
+        // Query error streams for this service (cached)
+        let error_matchers = vec![
             LabelMatcher {
                 name: "service".into(),
                 op: LabelMatchOp::Eq,
@@ -195,10 +228,27 @@ fn diagnose_service(state: &SharedState, service: &str) -> axum::response::Respo
                 value: "error".into(),
             },
         ];
-        let stream_ids = store.query_streams(&matchers);
+        let error_stream_ids = store.query_streams(&error_matchers);
+
+        // Error rate: bounded to last 1 hour
+        let total: usize = all_stream_ids
+            .iter()
+            .map(|sid| store.get_entries(*sid, lookback_start, now).len())
+            .sum();
+        let error_count: usize = error_stream_ids
+            .iter()
+            .map(|sid| store.get_entries(*sid, lookback_start, now).len())
+            .sum();
+        let rate = if total > 0 {
+            error_count as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        // Recent errors: bounded to last 1 hour, take top 10 by timestamp desc
         let mut errors: Vec<Value> = Vec::new();
-        for sid in stream_ids {
-            let entries = store.get_entries(sid, 0, i64::MAX);
+        for sid in &error_stream_ids {
+            let entries = store.get_entries(*sid, lookback_start, now);
             for entry in entries {
                 errors.push(json!({
                     "timestamp": entry.timestamp_ns.to_string(),
@@ -206,14 +256,36 @@ fn diagnose_service(state: &SharedState, service: &str) -> axum::response::Respo
                 }));
             }
         }
-        // Sort by timestamp descending, take last 10
         errors.sort_by(|a, b| {
             let ta = a["timestamp"].as_str().unwrap_or("0");
             let tb = b["timestamp"].as_str().unwrap_or("0");
             tb.cmp(ta)
         });
         errors.truncate(10);
-        errors
+
+        // Error trend: reuse cached error_stream_ids
+        let mut current = 0usize;
+        let mut previous = 0usize;
+        for sid in &error_stream_ids {
+            let entries = store.get_entries(*sid, now.saturating_sub(five_min_ns), now);
+            current += entries.len();
+            let prev_entries = store.get_entries(
+                *sid,
+                now.saturating_sub(2 * five_min_ns),
+                now.saturating_sub(five_min_ns),
+            );
+            previous += prev_entries.len();
+        }
+
+        (rate, errors, current, previous)
+    };
+
+    let direction = if current_5m > previous_5m {
+        "increasing"
+    } else if current_5m < previous_5m {
+        "decreasing"
+    } else {
+        "stable"
     };
 
     // --- All trace summaries for the service ---
@@ -262,45 +334,6 @@ fn diagnose_service(state: &SharedState, service: &str) -> axum::response::Respo
         (summaries, ratio, total_spans, error_spans, durations)
     };
 
-    // --- Error rate from logs ---
-    let error_rate_pct = {
-        let store = state.log_store.read();
-        let all_matchers = vec![LabelMatcher {
-            name: "service".into(),
-            op: LabelMatchOp::Eq,
-            value: service.to_string(),
-        }];
-        let all_stream_ids = store.query_streams(&all_matchers);
-        let total: usize = all_stream_ids
-            .iter()
-            .map(|sid| store.get_entries(*sid, 0, i64::MAX).len())
-            .sum();
-
-        let error_matchers = vec![
-            LabelMatcher {
-                name: "service".into(),
-                op: LabelMatchOp::Eq,
-                value: service.to_string(),
-            },
-            LabelMatcher {
-                name: "level".into(),
-                op: LabelMatchOp::Eq,
-                value: "error".into(),
-            },
-        ];
-        let error_stream_ids = store.query_streams(&error_matchers);
-        let error_count: usize = error_stream_ids
-            .iter()
-            .map(|sid| store.get_entries(*sid, 0, i64::MAX).len())
-            .sum();
-
-        if total > 0 {
-            error_count as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        }
-    };
-
     // --- Latency p99 (approximate) ---
     let latency_p99_ms = if trace_durations.is_empty() {
         0.0
@@ -311,7 +344,7 @@ fn diagnose_service(state: &SharedState, service: &str) -> axum::response::Respo
         sorted[idx] as f64 / 1_000_000.0
     };
 
-    // --- Health score ---
+    // --- Health score (computed inline from data already gathered) ---
     let mut health_score: f64 = 100.0;
 
     // Deduct for error rate
@@ -327,48 +360,6 @@ fn diagnose_service(state: &SharedState, service: &str) -> axum::response::Respo
     }
 
     health_score = health_score.clamp(0.0, 100.0);
-
-    // --- Error trend ---
-    let now_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64;
-    let five_min_ns: i64 = 5 * 60 * 1_000_000_000;
-
-    let (current_5m, previous_5m) = {
-        let store = state.log_store.read();
-        let error_matchers = vec![
-            LabelMatcher {
-                name: "service".into(),
-                op: LabelMatchOp::Eq,
-                value: service.to_string(),
-            },
-            LabelMatcher {
-                name: "level".into(),
-                op: LabelMatchOp::Eq,
-                value: "error".into(),
-            },
-        ];
-        let stream_ids = store.query_streams(&error_matchers);
-        let mut current = 0usize;
-        let mut previous = 0usize;
-        for sid in &stream_ids {
-            let entries = store.get_entries(*sid, now_ns - five_min_ns, now_ns);
-            current += entries.len();
-            let prev_entries =
-                store.get_entries(*sid, now_ns - 2 * five_min_ns, now_ns - five_min_ns);
-            previous += prev_entries.len();
-        }
-        (current, previous)
-    };
-
-    let direction = if current_5m > previous_5m {
-        "increasing"
-    } else if current_5m < previous_5m {
-        "decreasing"
-    } else {
-        "stable"
-    };
 
     // --- Key metrics ---
     let key_metrics = {

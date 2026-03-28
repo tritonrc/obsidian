@@ -36,6 +36,8 @@ pub struct RangeQueryParams {
 pub struct SeriesParams {
     #[serde(rename = "match[]", default)]
     pub matchers: Vec<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
 }
 
 /// GET /api/v1/query
@@ -184,12 +186,55 @@ pub async fn series(
     Query(params): Query<SeriesParams>,
 ) -> (StatusCode, Json<Value>) {
     let store = state.metric_store.read();
+
+    // Parse optional time bounds — return 400 for malformed timestamps
+    let start_ms = match params.start.as_deref() {
+        Some(s) => match parse_timestamp_ms(s) {
+            Some(ms) => Some(ms),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({"status": "error", "errorType": "bad_data", "error": format!("invalid start: {}", s)}),
+                    ),
+                );
+            }
+        },
+        None => None,
+    };
+    let end_ms = match params.end.as_deref() {
+        Some(s) => match parse_timestamp_ms(s) {
+            Some(ms) => Some(ms),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({"status": "error", "errorType": "bad_data", "error": format!("invalid end: {}", s)}),
+                    ),
+                );
+            }
+        },
+        None => None,
+    };
+
+    // Helper: check if a series has any samples in the time window
+    let has_samples_in_range = |id: u64| -> bool {
+        if start_ms.is_none() && end_ms.is_none() {
+            return true; // No time filter
+        }
+        let s = start_ms.unwrap_or(i64::MIN);
+        let e = end_ms.unwrap_or(i64::MAX);
+        !store.get_samples(id, s, e).is_empty()
+    };
+
     let mut all_series = Vec::new();
 
     if params.matchers.is_empty() {
         // Return all series
         for id in store.series.keys() {
-            if let Some(labels) = store.get_series_labels(*id) {
+            if has_samples_in_range(*id)
+                && let Some(labels) = store.get_series_labels(*id)
+            {
                 let map: serde_json::Map<String, Value> = labels
                     .into_iter()
                     .map(|(k, v)| (k, Value::String(v)))
@@ -220,6 +265,7 @@ pub async fn series(
                     let ids = store.select_series(&matchers);
                     for id in ids {
                         if seen_ids.insert(id)
+                            && has_samples_in_range(id)
                             && let Some(labels) = store.get_series_labels(id)
                         {
                             let map: serde_json::Map<String, Value> = labels
