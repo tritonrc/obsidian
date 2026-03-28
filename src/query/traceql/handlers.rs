@@ -41,7 +41,7 @@ fn param_to_ns(val: u64) -> i64 {
         val as i64
     } else {
         // Seconds — convert
-        val as i64 * 1_000_000_000
+        (val as i64).saturating_mul(1_000_000_000)
     }
 }
 

@@ -277,11 +277,11 @@ fn classify_to_ns(n: i64) -> i64 {
     if n > 1_000_000_000_000_000_000 {
         n // already nanoseconds
     } else if n > 1_000_000_000_000_000 {
-        n * 1_000 // microseconds -> ns
+        n.saturating_mul(1_000) // microseconds -> ns
     } else if n > 1_000_000_000_000 {
-        n * 1_000_000 // milliseconds -> ns
+        n.saturating_mul(1_000_000) // milliseconds -> ns
     } else {
-        n * 1_000_000_000 // seconds -> ns
+        n.saturating_mul(1_000_000_000) // seconds -> ns
     }
 }
 

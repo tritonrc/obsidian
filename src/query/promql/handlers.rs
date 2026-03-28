@@ -378,6 +378,6 @@ fn classify_to_ms(n: i64) -> i64 {
     } else if n > 1_000_000_000_000 {
         n // already milliseconds
     } else {
-        n * 1000 // seconds -> ms
+        n.saturating_mul(1000) // seconds -> ms
     }
 }
