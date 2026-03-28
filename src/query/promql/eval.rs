@@ -986,6 +986,7 @@ fn apply_binary_op(op: &str, l: f64, r: f64) -> f64 {
                 0.0
             }
         }
+        "^" => l.powf(r),
         _ => f64::NAN,
     }
 }
