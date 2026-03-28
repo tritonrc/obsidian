@@ -107,6 +107,12 @@ fn decode_snappy_json(body: &[u8]) -> Result<LokiPushRequest, anyhow::Error> {
         .decompress_vec(body)
         .map_err(|e| anyhow::anyhow!("snappy decompress failed: {}", e))?;
 
+    if decompressed.len() > super::MAX_DECOMPRESSED_SIZE {
+        return Err(anyhow::anyhow!(
+            "decompressed body exceeds maximum size of 64 MiB"
+        ));
+    }
+
     serde_json::from_slice(&decompressed)
         .map_err(|e| anyhow::anyhow!("failed to parse decompressed push: {}", e))
 }

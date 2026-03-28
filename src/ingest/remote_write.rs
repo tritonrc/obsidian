@@ -59,7 +59,13 @@ pub async fn remote_write_handler(
 
     let decoded = if is_snappy {
         match snap::raw::Decoder::new().decompress_vec(&body) {
-            Ok(d) => d,
+            Ok(d) => {
+                if d.len() > super::MAX_DECOMPRESSED_SIZE {
+                    tracing::warn!("decompressed remote write body exceeds 64 MiB limit");
+                    return StatusCode::BAD_REQUEST;
+                }
+                d
+            }
             Err(e) => {
                 tracing::warn!("failed to snappy-decompress remote write body: {}", e);
                 return StatusCode::BAD_REQUEST;
@@ -69,7 +75,13 @@ pub async fn remote_write_handler(
         // Also try snappy by default since Prometheus always sends snappy
         // but may not set the header
         match snap::raw::Decoder::new().decompress_vec(&body) {
-            Ok(d) => d,
+            Ok(d) => {
+                if d.len() > super::MAX_DECOMPRESSED_SIZE {
+                    tracing::warn!("decompressed remote write body exceeds 64 MiB limit");
+                    return StatusCode::BAD_REQUEST;
+                }
+                d
+            }
             Err(_) => body.to_vec(),
         }
     };
