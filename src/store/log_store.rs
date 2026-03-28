@@ -786,7 +786,7 @@ mod tests {
             ],
         );
         // Verify sorted
-        for (_id, stream) in &store.streams {
+        for stream in store.streams.values() {
             for w in stream.entries.windows(2) {
                 assert!(
                     w[0].timestamp_ns <= w[1].timestamp_ns,

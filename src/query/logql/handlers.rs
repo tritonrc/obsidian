@@ -168,23 +168,25 @@ async fn query_range_inner(
     // Compute effective step for cap validation.
     // When step is omitted, the evaluator uses the query's range as the implicit step
     // for metric queries. Extract it from the AST to validate correctly.
-    let effective_step_ns = step_ns.or_else(|| {
-        if let super::parser::LogQLExpr::MetricQuery { range, .. } = &expr {
+    let effective_step_ns = match (&expr, step_ns) {
+        (_, Some(s)) => Some(s),
+        (super::parser::LogQLExpr::MetricQuery { range, .. }, None) => {
             Some(range.as_nanos() as i64)
-        } else {
-            None // Stream queries don't loop over steps
         }
-    });
+        _ => None, // Stream queries don't loop over steps
+    };
 
-    if let Some(step) = effective_step_ns {
-        if step > 0 {
-            let num_steps = end_ns.saturating_sub(start_ns).max(0) / step;
-            if num_steps >= MAX_QUERY_STEPS {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"status": "error", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)})),
-                );
-            }
+    if let Some(step) = effective_step_ns
+        && step > 0
+    {
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step;
+        if num_steps >= MAX_QUERY_STEPS {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"status": "error", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)}),
+                ),
+            );
         }
     }
 
@@ -327,7 +329,7 @@ mod tests {
     fn test_parse_timestamp_ns_seconds() {
         assert_eq!(
             parse_timestamp_ns("1700000000"),
-            Some(1700000000_000_000_000)
+            Some(1_700_000_000_000_000_000)
         );
     }
 
@@ -335,7 +337,7 @@ mod tests {
     fn test_parse_timestamp_ns_milliseconds() {
         assert_eq!(
             parse_timestamp_ns("1700000000000"),
-            Some(1700000000_000_000_000)
+            Some(1_700_000_000_000_000_000)
         );
     }
 
@@ -343,14 +345,14 @@ mod tests {
     fn test_parse_timestamp_ns_microseconds() {
         assert_eq!(
             parse_timestamp_ns("1700000000000000"),
-            Some(1700000000_000_000_000)
+            Some(1_700_000_000_000_000_000)
         );
     }
 
     #[test]
     fn test_parse_timestamp_ns_float_seconds() {
         let result = parse_timestamp_ns("1700000000.5").unwrap();
-        assert!((result - 1700000000_500_000_000).abs() < 1000);
+        assert!((result - 1_700_000_000_500_000_000).abs() < 1000);
     }
 
     #[test]
@@ -422,7 +424,7 @@ mod tests {
     #[test]
     fn test_effective_step_from_metric_query_range() {
         // When step is None, the effective step comes from the MetricQuery range
-        use super::super::parser::{LogQLExpr, MetricFunc, LogQLMatcher, MatchOp};
+        use super::super::parser::{LogQLExpr, LogQLMatcher, MatchOp, MetricFunc};
         use std::time::Duration;
 
         let expr = LogQLExpr::MetricQuery {
@@ -438,13 +440,11 @@ mod tests {
         };
 
         let step_ns: Option<i64> = None;
-        let effective = step_ns.or_else(|| {
-            if let LogQLExpr::MetricQuery { range, .. } = &expr {
-                Some(range.as_nanos() as i64)
-            } else {
-                None
-            }
-        });
+        let effective = match (&expr, step_ns) {
+            (_, Some(s)) => Some(s),
+            (LogQLExpr::MetricQuery { range, .. }, None) => Some(range.as_nanos() as i64),
+            _ => None,
+        };
         assert_eq!(effective, Some(5_000_000_000));
     }
 }

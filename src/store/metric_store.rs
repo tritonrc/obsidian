@@ -854,7 +854,7 @@ mod tests {
             ],
         );
         // Verify sorted
-        for (_id, series) in &store.series {
+        for series in store.series.values() {
             for w in series.samples.windows(2) {
                 assert!(
                     w[0].timestamp_ms <= w[1].timestamp_ms,

@@ -386,6 +386,7 @@ impl Default for TraceStore {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_span(
         interner: &mut Rodeo,
         trace_id: [u8; 16],
@@ -719,16 +720,19 @@ mod tests {
 
         store.clear_service("service-a");
 
-        assert_eq!(store.total_spans, 1, "only service-a span should be removed");
+        assert_eq!(
+            store.total_spans, 1,
+            "only service-a span should be removed"
+        );
         let spans = store.get_trace(&trace_id);
         assert!(spans.is_some(), "trace should still exist");
         assert_eq!(spans.unwrap().len(), 1);
         assert_eq!(spans.unwrap()[0].service_name, svc_b);
 
         // service-a should be gone from index
-        assert!(store.service_index.get(&svc_a).is_none());
+        assert!(!store.service_index.contains_key(&svc_a));
         // service-b should still be in index
-        assert!(store.service_index.get(&svc_b).is_some());
+        assert!(store.service_index.contains_key(&svc_b));
     }
 
     #[test]
@@ -782,6 +786,6 @@ mod tests {
             "old span name should be removed after partial eviction"
         );
         // New span should still be indexed
-        assert!(store.name_index.get(&new_name).is_some());
+        assert!(store.name_index.contains_key(&new_name));
     }
 }

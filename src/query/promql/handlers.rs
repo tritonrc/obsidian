@@ -466,16 +466,16 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp_ms_seconds() {
-        assert_eq!(parse_timestamp_ms("1700000000"), Some(1700000000_000));
+        assert_eq!(parse_timestamp_ms("1700000000"), Some(1_700_000_000_000));
     }
 
     #[test]
     fn test_parse_timestamp_ms_milliseconds() {
-        assert_eq!(parse_timestamp_ms("1700000000000"), Some(1700000000_000));
+        assert_eq!(parse_timestamp_ms("1700000000000"), Some(1_700_000_000_000));
     }
 
     #[test]
     fn test_parse_timestamp_ms_float_seconds() {
-        assert_eq!(parse_timestamp_ms("1700000000.5"), Some(1700000000_500));
+        assert_eq!(parse_timestamp_ms("1700000000.5"), Some(1_700_000_000_500));
     }
 }

@@ -78,10 +78,7 @@ pub async fn logs_handler(
                     log_record.time_unix_nano as i64
                 };
 
-                let entry = LogEntry {
-                    timestamp_ns,
-                    line,
-                };
+                let entry = LogEntry { timestamp_ns, line };
 
                 prepared.push((labels, vec![entry]));
             }

@@ -76,7 +76,10 @@ pub async fn push_handler(
         match decode_snappy_json(&body) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("failed to decode Loki push (expected snappy-compressed JSON): {}", e);
+                tracing::warn!(
+                    "failed to decode Loki push (expected snappy-compressed JSON): {}",
+                    e
+                );
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({

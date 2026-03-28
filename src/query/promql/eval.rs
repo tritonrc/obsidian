@@ -1676,24 +1676,49 @@ mod tests {
     fn test_rate_with_counter_reset() {
         // Counter: 0, 10, 20, 5 (reset!), 15
         let samples = vec![
-            Sample { timestamp_ms: 1000, value: 0.0 },
-            Sample { timestamp_ms: 2000, value: 10.0 },
-            Sample { timestamp_ms: 3000, value: 20.0 },
-            Sample { timestamp_ms: 4000, value: 5.0 },   // reset
-            Sample { timestamp_ms: 5000, value: 15.0 },
+            Sample {
+                timestamp_ms: 1000,
+                value: 0.0,
+            },
+            Sample {
+                timestamp_ms: 2000,
+                value: 10.0,
+            },
+            Sample {
+                timestamp_ms: 3000,
+                value: 20.0,
+            },
+            Sample {
+                timestamp_ms: 4000,
+                value: 5.0,
+            }, // reset
+            Sample {
+                timestamp_ms: 5000,
+                value: 15.0,
+            },
         ];
         // Total increase = 10 + 10 + 5 + 10 = 35, over 4s = 8.75/s
         let result = compute_rate_like("rate", &samples, 5000);
         assert!(result.is_some());
         let val = result.unwrap();
-        assert!((val - 8.75).abs() < 0.01, "rate should be ~8.75, got {}", val);
+        assert!(
+            (val - 8.75).abs() < 0.01,
+            "rate should be ~8.75, got {}",
+            val
+        );
     }
 
     #[test]
     fn test_rate_no_reset() {
         let samples = vec![
-            Sample { timestamp_ms: 1000, value: 0.0 },
-            Sample { timestamp_ms: 5000, value: 100.0 },
+            Sample {
+                timestamp_ms: 1000,
+                value: 0.0,
+            },
+            Sample {
+                timestamp_ms: 5000,
+                value: 100.0,
+            },
         ];
         // rate = 100 / 4s = 25/s
         let result = compute_rate_like("rate", &samples, 5000);
@@ -1705,8 +1730,14 @@ mod tests {
     #[test]
     fn test_irate_with_reset() {
         let samples = vec![
-            Sample { timestamp_ms: 1000, value: 100.0 },
-            Sample { timestamp_ms: 2000, value: 5.0 }, // reset
+            Sample {
+                timestamp_ms: 1000,
+                value: 100.0,
+            },
+            Sample {
+                timestamp_ms: 2000,
+                value: 5.0,
+            }, // reset
         ];
         // irate: delta is negative (reset), so use curr.value = 5, dt = 1s -> 5/s
         let result = compute_rate_like("irate", &samples, 2000);
