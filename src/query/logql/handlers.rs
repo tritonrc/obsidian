@@ -15,6 +15,9 @@ use crate::store::SharedState;
 /// Hint included in LogQL parse error responses to help agents construct valid queries.
 const LOGQL_HINT: &str = "Example: {service=\"myapp\"} |= \"error\"";
 
+/// Maximum number of steps allowed in a range query. Matches Prometheus default of 11,000.
+const MAX_QUERY_STEPS: i64 = 11_000;
+
 #[derive(Debug, Deserialize)]
 pub struct QueryParams {
     pub query: String,
@@ -160,6 +163,16 @@ async fn query_range_inner(
             StatusCode::BAD_REQUEST,
             Json(json!({"status": "error", "error": "step must be positive"})),
         );
+    }
+
+    if let Some(step) = step_ns {
+        let num_steps = (end_ns - start_ns) / step;
+        if num_steps > MAX_QUERY_STEPS {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)})),
+            );
+        }
     }
 
     let store = state.log_store.read();
@@ -325,5 +338,54 @@ mod tests {
     fn test_parse_timestamp_ns_float_seconds() {
         let result = parse_timestamp_ns("1700000000.5").unwrap();
         assert!((result - 1700000000_500_000_000).abs() < 1000);
+    }
+
+    #[test]
+    fn test_max_query_steps_constant() {
+        assert_eq!(MAX_QUERY_STEPS, 11_000);
+    }
+
+    #[test]
+    fn test_step_count_within_limit() {
+        // 3600s range in ns / 1s step in ns = 3600 steps, under the 11000 cap
+        let start_ns: i64 = 1_700_000_000_000_000_000;
+        let end_ns: i64 = start_ns + 3_600_000_000_000; // 3600s in ns
+        let step_ns: i64 = 1_000_000_000; // 1s in ns
+        let num_steps = (end_ns - start_ns) / step_ns;
+        assert_eq!(num_steps, 3600);
+        assert!(num_steps <= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_exceeds_limit() {
+        // Range that produces more than 11000 steps
+        let start_ns: i64 = 1_700_000_000_000_000_000;
+        let step_ns: i64 = 1_000_000_000; // 1s in ns
+        let end_ns: i64 = start_ns + step_ns * 12_000; // 12000 steps
+        let num_steps = (end_ns - start_ns) / step_ns;
+        assert_eq!(num_steps, 12_000);
+        assert!(num_steps > MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_exactly_at_limit() {
+        // Exactly 11000 steps should be allowed
+        let start_ns: i64 = 1_700_000_000_000_000_000;
+        let step_ns: i64 = 1_000_000_000;
+        let end_ns: i64 = start_ns + step_ns * MAX_QUERY_STEPS;
+        let num_steps = (end_ns - start_ns) / step_ns;
+        assert_eq!(num_steps, MAX_QUERY_STEPS);
+        assert!(num_steps <= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_one_over_limit() {
+        // 11001 steps should be rejected
+        let start_ns: i64 = 1_700_000_000_000_000_000;
+        let step_ns: i64 = 1_000_000_000;
+        let end_ns: i64 = start_ns + step_ns * (MAX_QUERY_STEPS + 1);
+        let num_steps = (end_ns - start_ns) / step_ns;
+        assert_eq!(num_steps, MAX_QUERY_STEPS + 1);
+        assert!(num_steps > MAX_QUERY_STEPS);
     }
 }
