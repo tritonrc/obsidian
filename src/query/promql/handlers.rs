@@ -156,8 +156,8 @@ async fn query_range_inner(
         );
     }
 
-    let num_steps = (end_ms - start_ms) / step_ms;
-    if num_steps > MAX_QUERY_STEPS {
+    let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+    if num_steps >= MAX_QUERY_STEPS {
         return (
             StatusCode::BAD_REQUEST,
             Json(
@@ -410,9 +410,9 @@ mod tests {
         let start_ms: i64 = 1_700_000_000_000;
         let end_ms: i64 = start_ms + 3_600_000;
         let step_ms: i64 = 1_000;
-        let num_steps = (end_ms - start_ms) / step_ms;
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
         assert_eq!(num_steps, 3600);
-        assert!(num_steps <= MAX_QUERY_STEPS);
+        assert!(num_steps < MAX_QUERY_STEPS);
     }
 
     #[test]
@@ -421,19 +421,25 @@ mod tests {
         let start_ms: i64 = 1_700_000_000_000;
         let end_ms: i64 = start_ms + 11_001_000;
         let step_ms: i64 = 1;
-        let num_steps = (end_ms - start_ms) / step_ms;
-        assert!(num_steps > MAX_QUERY_STEPS);
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert!(num_steps >= MAX_QUERY_STEPS);
     }
 
     #[test]
     fn test_step_count_exactly_at_limit() {
-        // Exactly 11000 steps should be allowed
+        // Exactly 11000 steps should be rejected (off-by-one: eval loop is inclusive)
         let start_ms: i64 = 1_700_000_000_000;
         let step_ms: i64 = 1_000;
         let end_ms: i64 = start_ms + step_ms * MAX_QUERY_STEPS;
-        let num_steps = (end_ms - start_ms) / step_ms;
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
         assert_eq!(num_steps, MAX_QUERY_STEPS);
-        assert!(num_steps <= MAX_QUERY_STEPS);
+        assert!(num_steps >= MAX_QUERY_STEPS); // rejected
+
+        // 10999 steps should be allowed
+        let end_ms_ok: i64 = start_ms + step_ms * (MAX_QUERY_STEPS - 1);
+        let num_steps_ok = end_ms_ok.saturating_sub(start_ms).max(0) / step_ms;
+        assert_eq!(num_steps_ok, MAX_QUERY_STEPS - 1);
+        assert!(num_steps_ok < MAX_QUERY_STEPS); // allowed
     }
 
     #[test]
@@ -442,9 +448,20 @@ mod tests {
         let start_ms: i64 = 1_700_000_000_000;
         let step_ms: i64 = 1_000;
         let end_ms: i64 = start_ms + step_ms * (MAX_QUERY_STEPS + 1);
-        let num_steps = (end_ms - start_ms) / step_ms;
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
         assert_eq!(num_steps, MAX_QUERY_STEPS + 1);
-        assert!(num_steps > MAX_QUERY_STEPS);
+        assert!(num_steps >= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_overflow_protection() {
+        // Extreme timestamps: saturating_sub prevents overflow
+        let start_ms: i64 = -1_000_000_000_000;
+        let end_ms: i64 = i64::MAX;
+        let step_ms: i64 = 1_000;
+        // Without saturating_sub, this would overflow
+        let num_steps = end_ms.saturating_sub(start_ms).max(0) / step_ms;
+        assert!(num_steps >= MAX_QUERY_STEPS);
     }
 
     #[test]

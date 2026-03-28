@@ -165,9 +165,12 @@ async fn query_range_inner(
         );
     }
 
+    // Default to 60s step when not specified, so the step count cap always applies
+    let step_ns = step_ns.or(Some(60_000_000_000));
+
     if let Some(step) = step_ns {
-        let num_steps = (end_ns - start_ns) / step;
-        if num_steps > MAX_QUERY_STEPS {
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step;
+        if num_steps >= MAX_QUERY_STEPS {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"status": "error", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)})),
@@ -351,9 +354,9 @@ mod tests {
         let start_ns: i64 = 1_700_000_000_000_000_000;
         let end_ns: i64 = start_ns + 3_600_000_000_000; // 3600s in ns
         let step_ns: i64 = 1_000_000_000; // 1s in ns
-        let num_steps = (end_ns - start_ns) / step_ns;
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step_ns;
         assert_eq!(num_steps, 3600);
-        assert!(num_steps <= MAX_QUERY_STEPS);
+        assert!(num_steps < MAX_QUERY_STEPS);
     }
 
     #[test]
@@ -362,20 +365,26 @@ mod tests {
         let start_ns: i64 = 1_700_000_000_000_000_000;
         let step_ns: i64 = 1_000_000_000; // 1s in ns
         let end_ns: i64 = start_ns + step_ns * 12_000; // 12000 steps
-        let num_steps = (end_ns - start_ns) / step_ns;
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step_ns;
         assert_eq!(num_steps, 12_000);
-        assert!(num_steps > MAX_QUERY_STEPS);
+        assert!(num_steps >= MAX_QUERY_STEPS);
     }
 
     #[test]
     fn test_step_count_exactly_at_limit() {
-        // Exactly 11000 steps should be allowed
+        // Exactly 11000 steps should be rejected (off-by-one: eval loop is inclusive)
         let start_ns: i64 = 1_700_000_000_000_000_000;
         let step_ns: i64 = 1_000_000_000;
         let end_ns: i64 = start_ns + step_ns * MAX_QUERY_STEPS;
-        let num_steps = (end_ns - start_ns) / step_ns;
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step_ns;
         assert_eq!(num_steps, MAX_QUERY_STEPS);
-        assert!(num_steps <= MAX_QUERY_STEPS);
+        assert!(num_steps >= MAX_QUERY_STEPS); // rejected
+
+        // 10999 steps should be allowed
+        let end_ns_ok: i64 = start_ns + step_ns * (MAX_QUERY_STEPS - 1);
+        let num_steps_ok = end_ns_ok.saturating_sub(start_ns).max(0) / step_ns;
+        assert_eq!(num_steps_ok, MAX_QUERY_STEPS - 1);
+        assert!(num_steps_ok < MAX_QUERY_STEPS); // allowed
     }
 
     #[test]
@@ -384,8 +393,27 @@ mod tests {
         let start_ns: i64 = 1_700_000_000_000_000_000;
         let step_ns: i64 = 1_000_000_000;
         let end_ns: i64 = start_ns + step_ns * (MAX_QUERY_STEPS + 1);
-        let num_steps = (end_ns - start_ns) / step_ns;
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step_ns;
         assert_eq!(num_steps, MAX_QUERY_STEPS + 1);
-        assert!(num_steps > MAX_QUERY_STEPS);
+        assert!(num_steps >= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_count_overflow_protection() {
+        // Extreme timestamps: saturating_sub prevents overflow
+        let start_ns: i64 = -1_000_000_000_000_000_000;
+        let end_ns: i64 = i64::MAX;
+        let step_ns: i64 = 1_000_000_000;
+        // Without saturating_sub, this would overflow
+        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step_ns;
+        assert!(num_steps >= MAX_QUERY_STEPS);
+    }
+
+    #[test]
+    fn test_step_ns_defaults_when_none() {
+        // When step is None, it should default to 60s (60_000_000_000 ns)
+        let step_ns: Option<i64> = None;
+        let defaulted = step_ns.or(Some(60_000_000_000));
+        assert_eq!(defaulted, Some(60_000_000_000));
     }
 }
