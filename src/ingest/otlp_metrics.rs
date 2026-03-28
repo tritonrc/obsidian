@@ -142,7 +142,10 @@ pub async fn metrics_handler(
                         }
                     }
                     Some(Data::ExponentialHistogram(_)) => {
-                        // ExponentialHistogram is not supported — silently skip.
+                        tracing::warn!(
+                            metric = metric_name.as_str(),
+                            "skipping ExponentialHistogram — not supported"
+                        );
                     }
                     Some(Data::Summary(summary)) => {
                         for dp in &summary.data_points {
