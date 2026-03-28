@@ -126,7 +126,6 @@ fn any_value_to_string(val: &opentelemetry_proto::tonic::common::v1::AnyValue) -
         Some(any_value::Value::KvlistValue(kvlist)) => {
             serde_json::to_string(&kvlist).unwrap_or_else(|_| "<kvlist>".to_string())
         }
-        Some(_) => "<unknown>".to_string(),
         None => String::new(),
     }
 }

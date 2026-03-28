@@ -244,9 +244,7 @@ fn format_logql_result(result: LogQLResult, limit: usize) -> Value {
                     .iter_mut()
                     .enumerate()
                     .flat_map(|(idx, sr)| {
-                        sr.entries
-                            .drain(..)
-                            .map(move |(ts, line)| (idx, ts, line))
+                        sr.entries.drain(..).map(move |(ts, line)| (idx, ts, line))
                     })
                     .collect();
                 all.sort_by(|a, b| b.1.cmp(&a.1)); // newest first

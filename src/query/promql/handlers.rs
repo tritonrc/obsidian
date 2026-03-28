@@ -206,14 +206,14 @@ pub async fn series(
     if params.matchers.is_empty() {
         // Return all series
         for id in store.series.keys() {
-            if has_samples_in_range(*id) {
-                if let Some(labels) = store.get_series_labels(*id) {
-                    let map: serde_json::Map<String, Value> = labels
-                        .into_iter()
-                        .map(|(k, v)| (k, Value::String(v)))
-                        .collect();
-                    all_series.push(Value::Object(map));
-                }
+            if has_samples_in_range(*id)
+                && let Some(labels) = store.get_series_labels(*id)
+            {
+                let map: serde_json::Map<String, Value> = labels
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::String(v)))
+                    .collect();
+                all_series.push(Value::Object(map));
             }
         }
     } else {
