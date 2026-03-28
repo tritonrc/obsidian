@@ -146,7 +146,14 @@ async fn query_range_inner(
         None => now_ns,
     };
     let step_ns = match params.step.as_deref() {
-        Some(s) => match crate::config::parse_duration(s).map(|d| d.as_nanos() as i64) {
+        Some(s) => match crate::config::parse_duration(s).map(|d| {
+            let ns = d.as_nanos();
+            if ns > i64::MAX as u128 {
+                i64::MAX
+            } else {
+                ns as i64
+            }
+        }) {
             Some(ns) => Some(ns),
             None => {
                 return (
@@ -171,7 +178,12 @@ async fn query_range_inner(
     let effective_step_ns = match (&expr, step_ns) {
         (_, Some(s)) => Some(s),
         (super::parser::LogQLExpr::MetricQuery { range, .. }, None) => {
-            Some(range.as_nanos() as i64)
+            let ns = range.as_nanos();
+            Some(if ns > i64::MAX as u128 {
+                i64::MAX
+            } else {
+                ns as i64
+            })
         }
         _ => None, // Stream queries don't loop over steps
     };

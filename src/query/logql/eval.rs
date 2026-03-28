@@ -85,7 +85,14 @@ pub fn evaluate_logql(
             inner,
             range,
         } => {
-            let step = step_ns.unwrap_or(range.as_nanos() as i64);
+            let step = step_ns.unwrap_or_else(|| {
+                let ns = range.as_nanos();
+                if ns > i64::MAX as u128 {
+                    i64::MAX
+                } else {
+                    ns as i64
+                }
+            });
             evaluate_metric_query(function, inner, *range, store, start_ns, end_ns, step)
         }
     }
