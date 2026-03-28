@@ -165,16 +165,26 @@ async fn query_range_inner(
         );
     }
 
-    // Default to 60s step when not specified, so the step count cap always applies
-    let step_ns = step_ns.or(Some(60_000_000_000));
+    // Compute effective step for cap validation.
+    // When step is omitted, the evaluator uses the query's range as the implicit step
+    // for metric queries. Extract it from the AST to validate correctly.
+    let effective_step_ns = step_ns.or_else(|| {
+        if let super::parser::LogQLExpr::MetricQuery { range, .. } = &expr {
+            Some(range.as_nanos() as i64)
+        } else {
+            None // Stream queries don't loop over steps
+        }
+    });
 
-    if let Some(step) = step_ns {
-        let num_steps = end_ns.saturating_sub(start_ns).max(0) / step;
-        if num_steps >= MAX_QUERY_STEPS {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"status": "error", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)})),
-            );
+    if let Some(step) = effective_step_ns {
+        if step > 0 {
+            let num_steps = end_ns.saturating_sub(start_ns).max(0) / step;
+            if num_steps >= MAX_QUERY_STEPS {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"status": "error", "error": format!("query would produce {} steps, exceeding maximum of {}", num_steps, MAX_QUERY_STEPS)})),
+                );
+            }
         }
     }
 
@@ -410,10 +420,31 @@ mod tests {
     }
 
     #[test]
-    fn test_step_ns_defaults_when_none() {
-        // When step is None, it should default to 60s (60_000_000_000 ns)
+    fn test_effective_step_from_metric_query_range() {
+        // When step is None, the effective step comes from the MetricQuery range
+        use super::super::parser::{LogQLExpr, MetricFunc, LogQLMatcher, MatchOp};
+        use std::time::Duration;
+
+        let expr = LogQLExpr::MetricQuery {
+            function: MetricFunc::CountOverTime,
+            inner: Box::new(LogQLExpr::StreamSelector {
+                matchers: vec![LogQLMatcher {
+                    name: "service".into(),
+                    op: MatchOp::Eq,
+                    value: "test".into(),
+                }],
+            }),
+            range: Duration::from_secs(5), // 5s range = 5_000_000_000 ns step
+        };
+
         let step_ns: Option<i64> = None;
-        let defaulted = step_ns.or(Some(60_000_000_000));
-        assert_eq!(defaulted, Some(60_000_000_000));
+        let effective = step_ns.or_else(|| {
+            if let LogQLExpr::MetricQuery { range, .. } = &expr {
+                Some(range.as_nanos() as i64)
+            } else {
+                None
+            }
+        });
+        assert_eq!(effective, Some(5_000_000_000));
     }
 }
