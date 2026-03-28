@@ -110,12 +110,23 @@ fn severity_to_level(severity_number: i32) -> &'static str {
 }
 
 /// Convert an AnyValue to its string representation.
+///
+/// Primitive types are converted directly. Complex types (arrays, key-value lists,
+/// bytes) are serialized as JSON so log lines are never silently empty.
 fn any_value_to_string(val: &opentelemetry_proto::tonic::common::v1::AnyValue) -> String {
     match &val.value {
         Some(any_value::Value::StringValue(s)) => s.clone(),
         Some(any_value::Value::IntValue(i)) => i.to_string(),
         Some(any_value::Value::DoubleValue(f)) => f.to_string(),
         Some(any_value::Value::BoolValue(b)) => b.to_string(),
-        _ => String::new(),
+        Some(any_value::Value::BytesValue(bytes)) => format!("<bytes len={}>", bytes.len()),
+        Some(any_value::Value::ArrayValue(arr)) => {
+            serde_json::to_string(&arr).unwrap_or_else(|_| "<array>".to_string())
+        }
+        Some(any_value::Value::KvlistValue(kvlist)) => {
+            serde_json::to_string(&kvlist).unwrap_or_else(|_| "<kvlist>".to_string())
+        }
+        Some(_) => "<unknown>".to_string(),
+        None => String::new(),
     }
 }
