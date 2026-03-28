@@ -81,6 +81,9 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
     };
 
     let n: f64 = num_str.trim().parse().ok()?;
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
     Some(Duration::from_secs_f64(n * multiplier as f64))
 }
 
@@ -96,5 +99,16 @@ mod tests {
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
         assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn test_parse_duration_negative() {
+        assert_eq!(parse_duration("-1s"), None);
+        assert_eq!(parse_duration("-5m"), None);
+    }
+
+    #[test]
+    fn test_parse_duration_zero() {
+        assert_eq!(parse_duration("0s"), Some(Duration::from_secs(0)));
     }
 }
