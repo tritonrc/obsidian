@@ -184,7 +184,7 @@ async fn test_otlp_logs_ingest_and_logql_query() {
     let query = urlencoding::encode(r#"{service="auth-svc"}"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/loki/api/v1/query?query={}", query))
+        .uri(format!("/loki/api/v1/query?query={}", query))
         .body(Body::empty())
         .unwrap();
 
@@ -534,7 +534,7 @@ async fn test_trace_search_without_time_range_returns_all() {
     let query = urlencoding::encode(r#"{ status = error }"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/search?q={}", query))
+        .uri(format!("/api/search?q={}", query))
         .body(Body::empty())
         .unwrap();
 
@@ -588,7 +588,7 @@ async fn test_promql_topk_returns_top_k_series() {
     let query = urlencoding::encode("topk(3, cpu_usage)");
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/v1/query?query={}&time={}", query, now_ms))
+        .uri(format!("/api/v1/query?query={}&time={}", query, now_ms))
         .body(Body::empty())
         .unwrap();
 
@@ -644,7 +644,7 @@ async fn test_promql_bottomk_returns_bottom_k_series() {
     let query = urlencoding::encode("bottomk(2, mem_usage)");
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/v1/query?query={}&time={}", query, now_ms))
+        .uri(format!("/api/v1/query?query={}&time={}", query, now_ms))
         .body(Body::empty())
         .unwrap();
 
@@ -697,7 +697,7 @@ async fn test_promql_topk_with_k_larger_than_series_count() {
     let query = urlencoding::encode("topk(10, lone_metric)");
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/v1/query?query={}&time={}", query, now_ms))
+        .uri(format!("/api/v1/query?query={}&time={}", query, now_ms))
         .body(Body::empty())
         .unwrap();
 

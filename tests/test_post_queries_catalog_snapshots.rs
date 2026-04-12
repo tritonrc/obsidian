@@ -64,6 +64,7 @@ async fn catalog_data(app: &axum::Router) {
 }
 
 /// Build an ExportTraceServiceRequest with a single span that has one string attribute.
+#[allow(clippy::too_many_arguments)]
 fn make_trace_request_with_string_attribute(
     service_name: &str,
     span_name: &str,
@@ -140,7 +141,7 @@ async fn test_loki_query_range_accepts_post_form_body() {
     let encoded_query = urlencoding::encode(query);
     let get_req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start=1700000000&end=1700000001",
             encoded_query,
         ))
@@ -192,7 +193,7 @@ async fn test_promql_query_accepts_post_form_body() {
     let encoded_query = urlencoding::encode(query);
     let get_req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/v1/query?query={}&time=5", encoded_query))
+        .uri(format!("/api/v1/query?query={}&time=5", encoded_query))
         .body(Body::empty())
         .unwrap();
     let get_resp = app.clone().oneshot(get_req).await.unwrap();

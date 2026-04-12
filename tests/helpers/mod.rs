@@ -1,4 +1,5 @@
 //! Shared test helpers for constructing OTLP requests and test state.
+#![allow(dead_code)]
 
 use axum::body::Body;
 use axum::http::Request;
@@ -168,6 +169,7 @@ pub async fn ingest_metrics(
     app.clone().oneshot(r).await.unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn ingest_traces(
     app: &axum::Router,
     service: &str,

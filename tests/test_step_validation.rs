@@ -27,7 +27,7 @@ async fn test_logql_query_range_step_zero() {
     let query = urlencoding::encode(r#"{service="test"}"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start=1000000000.0&end=1700000000.0&step=0s",
             query
         ))

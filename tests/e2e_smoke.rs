@@ -5,7 +5,6 @@
 //! cross-feature data leakage. Every ingest is followed by a query that
 //! proves the data is retrievable with correct values/labels.
 
-#[allow(dead_code, clippy::too_many_arguments)]
 mod helpers;
 
 use helpers::{make_gauge_request, make_trace_request};
@@ -220,10 +219,10 @@ async fn test_e2e_smoke_all_features() {
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if let Ok(resp) = client.get(format!("{}/ready", base)).send().await {
-                if resp.status() == 200 {
-                    break;
-                }
+            if let Ok(resp) = client.get(format!("{}/ready", base)).send().await
+                && resp.status() == 200
+            {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -2056,10 +2055,10 @@ async fn test_e2e_smoke_all_features() {
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if let Ok(resp) = client.get(format!("{}/ready", restored_base)).send().await {
-                if resp.status() == 200 {
-                    break;
-                }
+            if let Ok(resp) = client.get(format!("{}/ready", restored_base)).send().await
+                && resp.status() == 200
+            {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,

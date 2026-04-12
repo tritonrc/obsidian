@@ -63,7 +63,7 @@ async fn test_logql_line_filter_on_json_log_lines() {
     let query = urlencoding::encode(r#"{service="app"} |= "error""#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start={}&end={}",
             query,
             ts_base - 1_000_000_000,
@@ -129,7 +129,7 @@ async fn test_logql_line_not_contains_filter() {
     let query = urlencoding::encode(r#"{service="app"} != "error""#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start={}&end={}",
             query,
             ts_base - 1_000_000_000,
@@ -186,7 +186,7 @@ async fn test_logql_regex_filter_on_json_log_lines() {
     let query = urlencoding::encode(r#"{service="app"} |~ "error|warn""#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start={}&end={}",
             query,
             ts_base - 1_000_000_000,
@@ -253,7 +253,7 @@ async fn test_loki_push_snappy_compressed_json() {
     let query = urlencoding::encode(r#"{service="snappy-svc"}"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start=1699999999&end=1700000001",
             query
         ))
@@ -349,7 +349,7 @@ async fn test_logql_parse_error_response() {
     let query = urlencoding::encode(r#"not a valid query"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/loki/api/v1/query?query={}", query))
+        .uri(format!("/loki/api/v1/query?query={}", query))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -375,7 +375,7 @@ async fn test_logql_query_range_parse_error_response() {
     let query = urlencoding::encode(r#"{invalid"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query_range?query={}&start=1700000000&end=1700000001",
             query
         ))
@@ -398,7 +398,7 @@ async fn test_promql_parse_error_response() {
     let query = urlencoding::encode(r#"invalid{[["#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/v1/query?query={}", query))
+        .uri(format!("/api/v1/query?query={}", query))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -424,7 +424,7 @@ async fn test_promql_query_range_parse_error_response() {
     let query = urlencoding::encode(r#"}{bad"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/api/v1/query_range?query={}&start=1700000000&end=1700000001&step=60s",
             query
         ))
@@ -448,7 +448,7 @@ async fn test_traceql_parse_error_response() {
     let query = urlencoding::encode(r#"not valid traceql"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/search?q={}", query))
+        .uri(format!("/api/search?q={}", query))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();

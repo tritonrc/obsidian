@@ -128,7 +128,7 @@ async fn test_logql_invalid_time_returns_400() {
     let query = urlencoding::encode(r#"{service="test"}"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/loki/api/v1/query?query={}&time=notanumber",
             query
         ))
@@ -220,7 +220,7 @@ async fn test_traceql_search_finds_actual_root() {
     let query = urlencoding::encode(r#"{ status = error }"#);
     let req = Request::builder()
         .method("GET")
-        .uri(&format!("/api/search?q={}", query))
+        .uri(format!("/api/search?q={}", query))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
