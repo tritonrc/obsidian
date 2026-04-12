@@ -2,14 +2,13 @@
 //!
 //! `MetricStore` stores time-series data indexed by metric name and label pairs.
 
-use std::hash::{Hash, Hasher};
-
 use lasso::{Rodeo, Spur};
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use super::posting_list::{PostingList, intersect, union};
+use super::posting_list::PostingList;
+use super::{LabelMatcher, LabelPairs};
 
 /// A single metric sample.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -25,13 +24,24 @@ pub struct MetricSeries {
     pub samples: Vec<Sample>,
 }
 
+/// Errors that can occur while registering metric identities.
+#[derive(Debug, thiserror::Error)]
+pub enum MetricStoreError {
+    #[error(
+        "metric name collision: normalized name `{normalized}` maps to both `{existing}` and `{incoming}`"
+    )]
+    MetricNameCollision {
+        normalized: String,
+        existing: String,
+        incoming: String,
+    },
+}
+
 /// In-memory metric storage with inverted index.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricStore {
     /// Series ID -> series data.
     pub series: FxHashMap<u64, MetricSeries>,
-    /// Metric name -> set of series IDs.
-    pub name_index: FxHashMap<Spur, PostingList>,
     /// Label pair (name, value) -> set of series IDs.
     pub label_index: FxHashMap<(Spur, Spur), PostingList>,
     /// Label name -> set of known values.
@@ -40,6 +50,15 @@ pub struct MetricStore {
     pub interner: Rodeo,
     /// Total series count for eviction.
     pub total_samples: usize,
+    /// Exact label-set to series ID mapping to avoid hash-collision merges.
+    #[serde(default)]
+    pub series_ids: FxHashMap<LabelPairs, u64>,
+    /// Next series ID for newly observed label sets.
+    #[serde(default)]
+    pub next_series_id: u64,
+    /// Normalized metric name -> original source metric name.
+    #[serde(default)]
+    pub normalized_name_sources: FxHashMap<Spur, Spur>,
 }
 
 impl MetricStore {
@@ -47,22 +66,77 @@ impl MetricStore {
     pub fn new() -> Self {
         Self {
             series: FxHashMap::default(),
-            name_index: FxHashMap::default(),
             label_index: FxHashMap::default(),
             label_values: FxHashMap::default(),
             interner: Rodeo::default(),
             total_samples: 0,
+            series_ids: FxHashMap::default(),
+            next_series_id: 0,
+            normalized_name_sources: FxHashMap::default(),
         }
     }
 
-    /// Compute series ID from __name__ + sorted label set.
-    fn compute_series_id(labels: &[(Spur, Spur)]) -> u64 {
-        let mut hasher = FxHasher::default();
-        for (k, v) in labels {
-            k.hash(&mut hasher);
-            v.hash(&mut hasher);
+    /// Rebuild exact series identity maps after loading older snapshots.
+    pub fn rebuild_series_ids(&mut self) {
+        self.series_ids.clear();
+        self.next_series_id = 0;
+
+        let mut series_ids: Vec<u64> = self.series.keys().copied().collect();
+        series_ids.sort_unstable();
+        for series_id in series_ids {
+            if let Some(series) = self.series.get(&series_id) {
+                self.series_ids.insert(series.labels.clone(), series_id);
+                self.next_series_id = self.next_series_id.max(series_id.saturating_add(1));
+            }
         }
-        hasher.finish()
+    }
+
+    /// Check for a metric-name collision without mutating store state.
+    pub fn check_metric_name_collision(
+        &self,
+        normalized_name: &str,
+        source_name: &str,
+    ) -> Result<(), MetricStoreError> {
+        let Some(normalized_spur) = self.interner.get(normalized_name) else {
+            return Ok(());
+        };
+
+        match self.normalized_name_sources.get(&normalized_spur).copied() {
+            Some(existing) if self.interner.resolve(&existing) != source_name => {
+                Err(MetricStoreError::MetricNameCollision {
+                    normalized: normalized_name.to_string(),
+                    existing: self.interner.resolve(&existing).to_string(),
+                    incoming: source_name.to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Register a visible metric name against its original source metric name.
+    pub fn register_metric_name(
+        &mut self,
+        normalized_name: &str,
+        source_name: &str,
+    ) -> Result<(), MetricStoreError> {
+        let normalized_spur = self.interner.get_or_intern(normalized_name);
+        let source_spur = self.interner.get_or_intern(source_name);
+
+        match self.normalized_name_sources.get(&normalized_spur).copied() {
+            Some(existing) if existing != source_spur => {
+                Err(MetricStoreError::MetricNameCollision {
+                    normalized: normalized_name.to_string(),
+                    existing: self.interner.resolve(&existing).to_string(),
+                    incoming: source_name.to_string(),
+                })
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.normalized_name_sources
+                    .insert(normalized_spur, source_spur);
+                Ok(())
+            }
+        }
     }
 
     /// Ingest samples for a metric with given name and labels.
@@ -72,36 +146,38 @@ impl MetricStore {
         labels: Vec<(String, String)>,
         samples: Vec<Sample>,
     ) {
-        let name_spur = self.interner.get_or_intern(name);
-        let name_key = self.interner.get_or_intern("__name__");
+        let mut all_labels = Vec::with_capacity(labels.len() + 1);
+        all_labels.push(("__name__".to_string(), name.to_string()));
+        all_labels.extend(labels);
 
-        // Intern labels and add __name__
-        let mut interned_labels: SmallVec<[(Spur, Spur); 8]> = SmallVec::new();
-        interned_labels.push((name_key, name_spur));
-        for (k, v) in &labels {
-            let ks = self.interner.get_or_intern(k);
-            let vs = self.interner.get_or_intern(v);
-            interned_labels.push((ks, vs));
-        }
-        interned_labels.sort_by_key(|(k, _)| *k);
+        let interned_labels = super::intern_label_pairs(&mut self.interner, &all_labels);
+        super::track_label_values(&mut self.label_values, &interned_labels);
 
-        // Track label values
-        for &(k, v) in &interned_labels {
-            self.label_values.entry(k).or_default().insert(v);
-        }
-
-        let series_id = Self::compute_series_id(&interned_labels);
-
-        let is_new = !self.series.contains_key(&series_id);
+        let series_id = match self.series_ids.get(&interned_labels).copied() {
+            Some(series_id) => series_id,
+            None => {
+                let series_id = self.next_series_id;
+                self.next_series_id = self.next_series_id.saturating_add(1);
+                self.series_ids.insert(interned_labels.clone(), series_id);
+                self.series.insert(
+                    series_id,
+                    MetricSeries {
+                        labels: interned_labels.clone(),
+                        samples: Vec::new(),
+                    },
+                );
+                for &(k, v) in &interned_labels {
+                    self.label_index
+                        .entry((k, v))
+                        .or_default()
+                        .insert(series_id);
+                }
+                series_id
+            }
+        };
 
         let sample_count = samples.len();
-        let series = self
-            .series
-            .entry(series_id)
-            .or_insert_with(|| MetricSeries {
-                labels: interned_labels.clone(),
-                samples: Vec::new(),
-            });
+        let series = self.series.get_mut(&series_id).expect("series must exist");
 
         let was_empty = series.samples.is_empty();
         for sample in samples {
@@ -119,153 +195,18 @@ impl MetricStore {
                 series.samples.sort_by_key(|s| s.timestamp_ms);
             }
         }
-
-        // Only update indexes for new series
-        if is_new {
-            self.name_index
-                .entry(name_spur)
-                .or_default()
-                .insert(series_id);
-
-            for &(k, v) in &interned_labels {
-                self.label_index
-                    .entry((k, v))
-                    .or_default()
-                    .insert(series_id);
-            }
-        }
     }
 
     /// Select series matching all the given label matchers.
     /// Matchers work the same as LogStore's label matchers.
-    pub fn select_series(&self, matchers: &[super::log_store::LabelMatcher]) -> Vec<u64> {
-        use super::log_store::LabelMatchOp;
-
-        if matchers.is_empty() {
-            return self.series.keys().copied().collect();
-        }
-
-        let mut positive_lists: Vec<PostingList> = Vec::new();
-
-        for matcher in matchers {
-            let name_spur = match self.interner.get(&matcher.name) {
-                Some(s) => s,
-                None => {
-                    // Label name not known at all
-                    match matcher.op {
-                        // Negative matchers match everything when label is missing
-                        LabelMatchOp::Neq | LabelMatchOp::NotRegex => {
-                            let mut all = PostingList::new();
-                            let mut all_ids: Vec<u64> = self.series.keys().copied().collect();
-                            all_ids.sort_unstable();
-                            for id in all_ids {
-                                all.insert(id);
-                            }
-                            positive_lists.push(all);
-                            continue;
-                        }
-                        // Positive matchers can't match an unknown label
-                        _ => return Vec::new(),
-                    }
-                }
-            };
-
-            match matcher.op {
-                LabelMatchOp::Eq => {
-                    // Special case: __name__ matcher uses name_index
-                    if matcher.name == "__name__" {
-                        let value_spur = match self.interner.get(&matcher.value) {
-                            Some(s) => s,
-                            None => return Vec::new(),
-                        };
-                        match self.name_index.get(&value_spur) {
-                            Some(pl) => positive_lists.push(pl.clone()),
-                            None => return Vec::new(),
-                        }
-                    } else {
-                        let value_spur = match self.interner.get(&matcher.value) {
-                            Some(s) => s,
-                            None => return Vec::new(),
-                        };
-                        match self.label_index.get(&(name_spur, value_spur)) {
-                            Some(pl) => positive_lists.push(pl.clone()),
-                            None => return Vec::new(),
-                        }
-                    }
-                }
-                LabelMatchOp::Neq => {
-                    let value_spur = self.interner.get(&matcher.value);
-                    // Start with ALL series IDs
-                    let mut all_ids: Vec<u64> = self.series.keys().copied().collect();
-                    all_ids.sort_unstable();
-                    let mut result = PostingList::new();
-                    // Get the IDs to exclude (those that have the exact matching value)
-                    let exclude = match value_spur {
-                        Some(vs) => self
-                            .label_index
-                            .get(&(name_spur, vs))
-                            .cloned()
-                            .unwrap_or_default(),
-                        None => PostingList::new(),
-                    };
-                    for id in all_ids {
-                        if !exclude.contains(id) {
-                            result.insert(id);
-                        }
-                    }
-                    positive_lists.push(result);
-                }
-                LabelMatchOp::Regex => {
-                    let re = match regex::Regex::new(&format!("^(?:{})$", matcher.value)) {
-                        Ok(r) => r,
-                        Err(_) => return Vec::new(),
-                    };
-                    let mut result = PostingList::new();
-                    if let Some(values) = self.label_values.get(&name_spur) {
-                        for &vs in values {
-                            let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str)
-                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
-                            {
-                                result = union(&result, pl);
-                            }
-                        }
-                    }
-                    positive_lists.push(result);
-                }
-                LabelMatchOp::NotRegex => {
-                    let re = match regex::Regex::new(&format!("^(?:{})$", matcher.value)) {
-                        Ok(r) => r,
-                        Err(_) => return Vec::new(),
-                    };
-                    // Start with ALL series IDs
-                    let mut all_ids: Vec<u64> = self.series.keys().copied().collect();
-                    all_ids.sort_unstable();
-                    let mut result = PostingList::new();
-                    // Build exclude set: series that DO match the regex
-                    let mut exclude = PostingList::new();
-                    if let Some(values) = self.label_values.get(&name_spur) {
-                        for &vs in values {
-                            let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str)
-                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
-                            {
-                                exclude = union(&exclude, pl);
-                            }
-                        }
-                    }
-                    for id in all_ids {
-                        if !exclude.contains(id) {
-                            result.insert(id);
-                        }
-                    }
-                    positive_lists.push(result);
-                }
-            }
-        }
-
-        let refs: Vec<&PostingList> = positive_lists.iter().collect();
-        intersect(&refs)
+    pub fn select_series(&self, matchers: &[LabelMatcher]) -> Vec<u64> {
+        super::select_indexed_ids(
+            &self.interner,
+            &self.label_index,
+            &self.label_values,
+            || self.series.keys().copied().collect(),
+            matchers,
+        )
     }
 
     /// Get samples for a series within a time range (milliseconds).
@@ -341,36 +282,13 @@ impl MetricStore {
         for sid in series_ids.into_iter().take(to_remove) {
             if let Some(series) = self.series.remove(&sid) {
                 self.total_samples = self.total_samples.saturating_sub(series.samples.len());
-
-                // Clean up label_index
-                for &(k, v) in &series.labels {
-                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                        pl.remove(sid);
-                        if pl.is_empty() {
-                            self.label_index.remove(&(k, v));
-                            if let Some(vals) = self.label_values.get_mut(&k) {
-                                vals.remove(&v);
-                                if vals.is_empty() {
-                                    self.label_values.remove(&k);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Clean up name_index
-                let name_key = self.interner.get("__name__");
-                if let Some(name_key) = name_key {
-                    for &(k, v) in &series.labels {
-                        if k == name_key
-                            && let Some(pl) = self.name_index.get_mut(&v)
-                        {
-                            pl.remove(sid);
-                            if pl.is_empty() {
-                                self.name_index.remove(&v);
-                            }
-                        }
-                    }
-                }
+                self.series_ids.remove(&series.labels);
+                super::remove_from_label_indexes(
+                    &mut self.label_index,
+                    &mut self.label_values,
+                    &series.labels,
+                    sid,
+                );
             }
         }
     }
@@ -395,34 +313,13 @@ impl MetricStore {
 
         for series_id in empty_series {
             if let Some(series) = self.series.remove(&series_id) {
-                for &(k, v) in &series.labels {
-                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                        pl.remove(series_id);
-                        if pl.is_empty() {
-                            self.label_index.remove(&(k, v));
-                            if let Some(vals) = self.label_values.get_mut(&k) {
-                                vals.remove(&v);
-                                if vals.is_empty() {
-                                    self.label_values.remove(&k);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Also remove from name_index
-                let name_key = self.interner.get("__name__");
-                if let Some(name_key) = name_key {
-                    for &(k, v) in &series.labels {
-                        if k == name_key
-                            && let Some(pl) = self.name_index.get_mut(&v)
-                        {
-                            pl.remove(series_id);
-                            if pl.is_empty() {
-                                self.name_index.remove(&v);
-                            }
-                        }
-                    }
-                }
+                self.series_ids.remove(&series.labels);
+                super::remove_from_label_indexes(
+                    &mut self.label_index,
+                    &mut self.label_values,
+                    &series.labels,
+                    series_id,
+                );
             }
         }
     }
@@ -430,11 +327,13 @@ impl MetricStore {
     /// Clear all data from the store.
     pub fn clear(&mut self) {
         self.series.clear();
-        self.name_index.clear();
         self.label_index.clear();
         self.label_values.clear();
         self.interner = Rodeo::default();
         self.total_samples = 0;
+        self.series_ids.clear();
+        self.next_series_id = 0;
+        self.normalized_name_sources.clear();
     }
 
     /// Clear all data belonging to a specific service.
@@ -457,35 +356,13 @@ impl MetricStore {
         for series_id in series_ids {
             if let Some(series) = self.series.remove(&series_id) {
                 self.total_samples = self.total_samples.saturating_sub(series.samples.len());
-                // Clean up label_index and label_values
-                for &(k, v) in &series.labels {
-                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                        pl.remove(series_id);
-                        if pl.is_empty() {
-                            self.label_index.remove(&(k, v));
-                            if let Some(vals) = self.label_values.get_mut(&k) {
-                                vals.remove(&v);
-                                if vals.is_empty() {
-                                    self.label_values.remove(&k);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Clean up name_index
-                let name_key = self.interner.get("__name__");
-                if let Some(name_key) = name_key {
-                    for &(k, v) in &series.labels {
-                        if k == name_key
-                            && let Some(pl) = self.name_index.get_mut(&v)
-                        {
-                            pl.remove(series_id);
-                            if pl.is_empty() {
-                                self.name_index.remove(&v);
-                            }
-                        }
-                    }
-                }
+                self.series_ids.remove(&series.labels);
+                super::remove_from_label_indexes(
+                    &mut self.label_index,
+                    &mut self.label_values,
+                    &series.labels,
+                    series_id,
+                );
             }
         }
     }
@@ -510,13 +387,6 @@ impl MetricStore {
         bytes += self.series.len()
             * (std::mem::size_of::<u64>() + std::mem::size_of::<MetricSeries>() + 8);
 
-        // Name index: FxHashMap<Spur, PostingList>
-        for pl in self.name_index.values() {
-            bytes += pl.len() * std::mem::size_of::<u64>();
-        }
-        bytes += self.name_index.len()
-            * (std::mem::size_of::<Spur>() + std::mem::size_of::<PostingList>() + 8);
-
         // Label index: FxHashMap<(Spur, Spur), PostingList>
         for pl in self.label_index.values() {
             bytes += pl.len() * std::mem::size_of::<u64>();
@@ -533,6 +403,11 @@ impl MetricStore {
         // Interner memory
         bytes += self.interner.current_memory_usage();
 
+        // Exact identity and normalized-name tracking
+        bytes += self.series_ids.len()
+            * (std::mem::size_of::<LabelPairs>() + std::mem::size_of::<u64>() + 8);
+        bytes += self.normalized_name_sources.len() * (std::mem::size_of::<Spur>() * 2 + 8);
+
         bytes
     }
 }
@@ -546,7 +421,7 @@ impl Default for MetricStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::log_store::{LabelMatchOp, LabelMatcher};
+    use crate::store::{LabelMatchOp, LabelMatcher};
 
     #[test]
     fn test_ingest_and_select() {

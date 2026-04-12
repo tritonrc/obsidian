@@ -8,3 +8,4 @@ pub mod openapi;
 pub mod reset;
 pub mod services;
 pub mod status;
+pub mod summary;

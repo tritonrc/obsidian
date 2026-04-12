@@ -57,6 +57,26 @@ fn query_endpoint(summary: &str, tag: &str, params: Value) -> Value {
                 }},
                 "400": { "description": "Invalid query" }
             }
+        },
+        "post": {
+            "summary": summary,
+            "tags": [tag],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/x-www-form-urlencoded": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            },
+            "responses": {
+                "200": { "description": "Query results", "content": {
+                    "application/json": { "schema": { "$ref": "#/components/schemas/QueryResponse" } }
+                }},
+                "400": { "description": "Invalid query" }
+            }
         }
     })
 }
@@ -85,17 +105,24 @@ fn spec() -> Value {
         json!({
             "post": {
                 "summary": "Ingest logs via Loki push API",
+                "description": "Accepts Loki JSON directly, or snappy-compressed JSON using application/x-protobuf or application/x-snappy. Native Loki protobuf is not supported.",
                 "tags": ["ingestion"],
                 "requestBody": {
                     "required": true,
                     "content": {
                         "application/json": {
                             "schema": { "$ref": "#/components/schemas/LokiPushRequest" }
+                        },
+                        "application/x-protobuf": {
+                            "schema": { "type": "string", "format": "binary" }
+                        },
+                        "application/x-snappy": {
+                            "schema": { "type": "string", "format": "binary" }
                         }
                     }
                 },
                 "responses": {
-                    "204": { "description": "Logs ingested successfully" },
+                    "200": { "description": "Logs ingested successfully" },
                     "400": { "description": "Invalid request body" }
                 }
             }
@@ -112,6 +139,28 @@ fn spec() -> Value {
     paths.insert(
         "/v1/logs".into(),
         protobuf_post("Ingest logs via OTLP/HTTP", "ingestion"),
+    );
+    paths.insert(
+        "/api/v1/write".into(),
+        json!({
+            "post": {
+                "summary": "Ingest metrics via Prometheus remote write",
+                "description": "Accepts Prometheus remote write protobuf. Snappy compression is supported and expected by most clients.",
+                "tags": ["ingestion"],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/x-protobuf": {
+                            "schema": { "type": "string", "format": "binary" }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": { "description": "Metrics ingested successfully" },
+                    "400": { "description": "Invalid payload" }
+                }
+            }
+        }),
     );
 
     // LogQL query endpoints
@@ -302,10 +351,35 @@ fn spec() -> Value {
     );
     paths.insert(
         "/api/v1/catalog".into(),
-        simple_get(
-            "Get a catalog of all known metrics, labels, and services",
-            "discovery",
-        ),
+        json!({
+            "get": {
+                "summary": "Get a catalog of metrics, log labels, and span attributes for one service",
+                "tags": ["discovery"],
+                "parameters": [
+                    { "name": "service", "in": "query", "required": true, "schema": { "type": "string" }, "description": "Service name" }
+                ],
+                "responses": {
+                    "200": { "description": "Catalog", "content": { "application/json": {} } },
+                    "400": { "description": "Missing required parameter" }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/api/v1/summary".into(),
+        json!({
+            "get": {
+                "summary": "Get a compact cross-signal error summary for one service",
+                "tags": ["discovery"],
+                "parameters": [
+                    { "name": "service", "in": "query", "required": true, "schema": { "type": "string" }, "description": "Service name" }
+                ],
+                "responses": {
+                    "200": { "description": "Service summary", "content": { "application/json": {} } },
+                    "400": { "description": "Missing required parameter" }
+                }
+            }
+        }),
     );
     paths.insert(
         "/api/v1/reset".into(),
@@ -313,6 +387,9 @@ fn spec() -> Value {
             "delete": {
                 "summary": "Reset all in-memory stores",
                 "tags": ["management"],
+                "parameters": [
+                    { "name": "service", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Optional service name for targeted reset" }
+                ],
                 "responses": {
                     "200": { "description": "Stores reset successfully" }
                 }
@@ -439,7 +516,7 @@ fn spec() -> Value {
         json!({
             "title": "Obsidian",
             "description": "Lightweight ephemeral observability engine exposing LogQL, PromQL, and TraceQL query surfaces over in-memory stores.",
-            "version": "0.4.0"
+            "version": "0.7.0"
         }),
     );
     doc.insert("paths".into(), Value::Object(paths));
@@ -468,6 +545,7 @@ mod tests {
             "/loki/api/v1/labels",
             "/loki/api/v1/label/{name}/values",
             "/loki/api/v1/push",
+            "/api/v1/write",
             "/api/v1/query",
             "/api/v1/query_range",
             "/api/v1/labels",
@@ -482,6 +560,7 @@ mod tests {
             "/v1/logs",
             "/api/v1/diagnose",
             "/api/v1/catalog",
+            "/api/v1/summary",
             "/api/v1/reset",
             "/api/v1/metadata",
             "/api/v1/openapi.json",

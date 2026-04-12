@@ -3,14 +3,13 @@
 //! `LogStore` stores log streams indexed by label pairs using sorted posting lists.
 //! Each stream contains an ordered sequence of `LogEntry` items.
 
-use std::hash::{Hash, Hasher};
-
 use lasso::{Rodeo, Spur};
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use super::posting_list::{PostingList, intersect, union};
+use super::posting_list::PostingList;
+use super::{LabelMatcher, LabelPairs};
 
 /// A single log entry with nanosecond timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,25 +25,8 @@ pub struct LogStream {
     pub entries: Vec<LogEntry>,
 }
 
-/// Types of label matchers for queries.
-#[derive(Debug, Clone)]
-pub enum LabelMatchOp {
-    Eq,
-    Neq,
-    Regex,
-    NotRegex,
-}
-
-/// A label matcher used in stream selectors.
-#[derive(Debug, Clone)]
-pub struct LabelMatcher {
-    pub name: String,
-    pub op: LabelMatchOp,
-    pub value: String,
-}
-
 /// In-memory log storage with inverted index.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogStore {
     /// Stream ID -> stream data.
     pub streams: FxHashMap<u64, LogStream>,
@@ -56,6 +38,12 @@ pub struct LogStore {
     pub interner: Rodeo,
     /// Total entry count for eviction.
     pub total_entries: usize,
+    /// Exact label-set to stream ID mapping to avoid hash-collision merges.
+    #[serde(default)]
+    pub stream_ids: FxHashMap<LabelPairs, u64>,
+    /// Next stream ID for newly observed label sets.
+    #[serde(default)]
+    pub next_stream_id: u64,
 }
 
 impl LogStore {
@@ -67,46 +55,56 @@ impl LogStore {
             label_values: FxHashMap::default(),
             interner: Rodeo::default(),
             total_entries: 0,
+            stream_ids: FxHashMap::default(),
+            next_stream_id: 0,
         }
     }
 
-    /// Compute stream ID from a sorted label set.
-    fn compute_stream_id(labels: &[(Spur, Spur)]) -> u64 {
-        let mut hasher = FxHasher::default();
-        for (k, v) in labels {
-            k.hash(&mut hasher);
-            v.hash(&mut hasher);
+    /// Rebuild the label-set to stream-ID map after loading older snapshots.
+    pub fn rebuild_stream_ids(&mut self) {
+        self.stream_ids.clear();
+        self.next_stream_id = 0;
+
+        let mut stream_ids: Vec<u64> = self.streams.keys().copied().collect();
+        stream_ids.sort_unstable();
+        for stream_id in stream_ids {
+            if let Some(stream) = self.streams.get(&stream_id) {
+                self.stream_ids.insert(stream.labels.clone(), stream_id);
+                self.next_stream_id = self.next_stream_id.max(stream_id.saturating_add(1));
+            }
         }
-        hasher.finish()
     }
 
     /// Ingest a stream with the given labels and entries.
     pub fn ingest_stream(&mut self, labels: Vec<(String, String)>, entries: Vec<LogEntry>) {
-        // Intern and sort labels
-        let mut interned_labels: SmallVec<[(Spur, Spur); 8]> = labels
-            .iter()
-            .map(|(k, v)| {
-                let ks = self.interner.get_or_intern(k);
-                let vs = self.interner.get_or_intern(v);
-                (ks, vs)
-            })
-            .collect();
-        interned_labels.sort_by_key(|(k, _)| *k);
+        let interned_labels = super::intern_label_pairs(&mut self.interner, &labels);
+        super::track_label_values(&mut self.label_values, &interned_labels);
 
-        // Track label values
-        for &(k, v) in &interned_labels {
-            self.label_values.entry(k).or_default().insert(v);
-        }
-
-        let stream_id = Self::compute_stream_id(&interned_labels);
-
-        let is_new = !self.streams.contains_key(&stream_id);
+        let stream_id = match self.stream_ids.get(&interned_labels).copied() {
+            Some(stream_id) => stream_id,
+            None => {
+                let stream_id = self.next_stream_id;
+                self.next_stream_id = self.next_stream_id.saturating_add(1);
+                self.stream_ids.insert(interned_labels.clone(), stream_id);
+                self.streams.insert(
+                    stream_id,
+                    LogStream {
+                        labels: interned_labels.clone(),
+                        entries: Vec::new(),
+                    },
+                );
+                for &(k, v) in &interned_labels {
+                    self.label_index
+                        .entry((k, v))
+                        .or_default()
+                        .insert(stream_id);
+                }
+                stream_id
+            }
+        };
 
         let entry_count = entries.len();
-        let stream = self.streams.entry(stream_id).or_insert_with(|| LogStream {
-            labels: interned_labels.clone(),
-            entries: Vec::new(),
-        });
+        let stream = self.streams.get_mut(&stream_id).expect("stream must exist");
 
         let was_empty = stream.entries.is_empty();
         for entry in entries {
@@ -126,134 +124,17 @@ impl LogStore {
                 stream.entries.sort_by_key(|e| e.timestamp_ns);
             }
         }
-
-        // Only update inverted index for new streams
-        if is_new {
-            for &(k, v) in &interned_labels {
-                self.label_index
-                    .entry((k, v))
-                    .or_default()
-                    .insert(stream_id);
-            }
-        }
     }
 
     /// Query streams matching all the given label matchers.
     pub fn query_streams(&self, matchers: &[LabelMatcher]) -> Vec<u64> {
-        if matchers.is_empty() {
-            return self.streams.keys().copied().collect();
-        }
-
-        let mut positive_lists: Vec<PostingList> = Vec::new();
-
-        for matcher in matchers {
-            let name_spur = match self.interner.get(&matcher.name) {
-                Some(s) => s,
-                None => {
-                    // Label name not known at all
-                    match matcher.op {
-                        // Negative matchers match everything when label is missing
-                        LabelMatchOp::Neq | LabelMatchOp::NotRegex => {
-                            let mut all = PostingList::new();
-                            let mut all_ids: Vec<u64> = self.streams.keys().copied().collect();
-                            all_ids.sort_unstable();
-                            for id in all_ids {
-                                all.insert(id);
-                            }
-                            positive_lists.push(all);
-                            continue;
-                        }
-                        // Positive matchers can't match an unknown label
-                        _ => return Vec::new(),
-                    }
-                }
-            };
-
-            match matcher.op {
-                LabelMatchOp::Eq => {
-                    let value_spur = match self.interner.get(&matcher.value) {
-                        Some(s) => s,
-                        None => return Vec::new(),
-                    };
-                    match self.label_index.get(&(name_spur, value_spur)) {
-                        Some(pl) => positive_lists.push(pl.clone()),
-                        None => return Vec::new(),
-                    }
-                }
-                LabelMatchOp::Neq => {
-                    let value_spur = self.interner.get(&matcher.value);
-                    // Start with ALL stream IDs
-                    let mut all_ids: Vec<u64> = self.streams.keys().copied().collect();
-                    all_ids.sort_unstable();
-                    let mut result = PostingList::new();
-                    // Get the IDs to exclude (those that have the exact matching value)
-                    let exclude = match value_spur {
-                        Some(vs) => self
-                            .label_index
-                            .get(&(name_spur, vs))
-                            .cloned()
-                            .unwrap_or_default(),
-                        None => PostingList::new(),
-                    };
-                    for id in all_ids {
-                        if !exclude.contains(id) {
-                            result.insert(id);
-                        }
-                    }
-                    positive_lists.push(result);
-                }
-                LabelMatchOp::Regex => {
-                    let re = match regex::Regex::new(&format!("^(?:{})$", matcher.value)) {
-                        Ok(r) => r,
-                        Err(_) => return Vec::new(),
-                    };
-                    let mut result = PostingList::new();
-                    if let Some(values) = self.label_values.get(&name_spur) {
-                        for &vs in values {
-                            let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str)
-                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
-                            {
-                                result = union(&result, pl);
-                            }
-                        }
-                    }
-                    positive_lists.push(result);
-                }
-                LabelMatchOp::NotRegex => {
-                    let re = match regex::Regex::new(&format!("^(?:{})$", matcher.value)) {
-                        Ok(r) => r,
-                        Err(_) => return Vec::new(),
-                    };
-                    // Start with ALL stream IDs
-                    let mut all_ids: Vec<u64> = self.streams.keys().copied().collect();
-                    all_ids.sort_unstable();
-                    let mut result = PostingList::new();
-                    // Build exclude set: streams that DO match the regex
-                    let mut exclude = PostingList::new();
-                    if let Some(values) = self.label_values.get(&name_spur) {
-                        for &vs in values {
-                            let val_str = self.interner.resolve(&vs);
-                            if re.is_match(val_str)
-                                && let Some(pl) = self.label_index.get(&(name_spur, vs))
-                            {
-                                exclude = union(&exclude, pl);
-                            }
-                        }
-                    }
-                    for id in all_ids {
-                        if !exclude.contains(id) {
-                            result.insert(id);
-                        }
-                    }
-                    positive_lists.push(result);
-                }
-            }
-        }
-
-        // Intersect all positive lists
-        let refs: Vec<&PostingList> = positive_lists.iter().collect();
-        intersect(&refs)
+        super::select_indexed_ids(
+            &self.interner,
+            &self.label_index,
+            &self.label_values,
+            || self.streams.keys().copied().collect(),
+            matchers,
+        )
     }
 
     /// Get entries for a stream within a time range.
@@ -329,20 +210,13 @@ impl LogStore {
 
         for stream_id in empty_streams {
             if let Some(stream) = self.streams.remove(&stream_id) {
-                for &(k, v) in &stream.labels {
-                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                        pl.remove(stream_id);
-                        if pl.is_empty() {
-                            self.label_index.remove(&(k, v));
-                            if let Some(vals) = self.label_values.get_mut(&k) {
-                                vals.remove(&v);
-                                if vals.is_empty() {
-                                    self.label_values.remove(&k);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.stream_ids.remove(&stream.labels);
+                super::remove_from_label_indexes(
+                    &mut self.label_index,
+                    &mut self.label_values,
+                    &stream.labels,
+                    stream_id,
+                );
             }
         }
     }
@@ -376,20 +250,13 @@ impl LogStore {
                 if stream.entries.is_empty()
                     && let Some(stream) = self.streams.remove(&sid)
                 {
-                    for &(k, v) in &stream.labels {
-                        if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                            pl.remove(sid);
-                            if pl.is_empty() {
-                                self.label_index.remove(&(k, v));
-                                if let Some(vals) = self.label_values.get_mut(&k) {
-                                    vals.remove(&v);
-                                    if vals.is_empty() {
-                                        self.label_values.remove(&k);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.stream_ids.remove(&stream.labels);
+                    super::remove_from_label_indexes(
+                        &mut self.label_index,
+                        &mut self.label_values,
+                        &stream.labels,
+                        sid,
+                    );
                 }
             }
         }
@@ -401,6 +268,8 @@ impl LogStore {
         self.label_index.clear();
         self.label_values.clear();
         self.interner = Rodeo::default();
+        self.stream_ids.clear();
+        self.next_stream_id = 0;
         self.total_entries = 0;
     }
 
@@ -424,21 +293,13 @@ impl LogStore {
         for stream_id in stream_ids {
             if let Some(stream) = self.streams.remove(&stream_id) {
                 self.total_entries = self.total_entries.saturating_sub(stream.entries.len());
-                // Clean up label index
-                for &(k, v) in &stream.labels {
-                    if let Some(pl) = self.label_index.get_mut(&(k, v)) {
-                        pl.remove(stream_id);
-                        if pl.is_empty() {
-                            self.label_index.remove(&(k, v));
-                            if let Some(vals) = self.label_values.get_mut(&k) {
-                                vals.remove(&v);
-                                if vals.is_empty() {
-                                    self.label_values.remove(&k);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.stream_ids.remove(&stream.labels);
+                super::remove_from_label_indexes(
+                    &mut self.label_index,
+                    &mut self.label_values,
+                    &stream.labels,
+                    stream_id,
+                );
             }
         }
     }
@@ -498,6 +359,7 @@ impl Default for LogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::LabelMatchOp;
 
     fn make_entry(ts: i64, line: &str) -> LogEntry {
         LogEntry {

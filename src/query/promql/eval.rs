@@ -11,8 +11,8 @@ use regex::Regex;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
-use crate::store::log_store::{LabelMatchOp, LabelMatcher};
 use crate::store::metric_store::{MetricStore, Sample};
+use crate::store::{LabelMatchOp, LabelMatcher};
 
 /// Convert an optional `Offset` to a signed millisecond value.
 /// `Pos` offsets shift the lookup window into the past (positive ms to subtract),

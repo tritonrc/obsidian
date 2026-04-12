@@ -58,13 +58,11 @@ pub async fn remote_write_handler(
         .is_some_and(|v| v.eq_ignore_ascii_case("snappy"));
 
     let decoded = if is_snappy {
-        match snap::raw::Decoder::new().decompress_vec(&body) {
-            Ok(d) => {
-                if d.len() > super::MAX_DECOMPRESSED_SIZE {
-                    tracing::warn!("decompressed remote write body exceeds 64 MiB limit");
-                    return StatusCode::BAD_REQUEST;
-                }
-                d
+        match super::decode_snappy_body(&body) {
+            Ok(d) => d,
+            Err(super::IngestError::PayloadTooLarge) => {
+                tracing::warn!("decompressed remote write body exceeds 64 MiB limit");
+                return StatusCode::BAD_REQUEST;
             }
             Err(e) => {
                 tracing::warn!("failed to snappy-decompress remote write body: {}", e);
@@ -74,13 +72,11 @@ pub async fn remote_write_handler(
     } else {
         // Also try snappy by default since Prometheus always sends snappy
         // but may not set the header
-        match snap::raw::Decoder::new().decompress_vec(&body) {
-            Ok(d) => {
-                if d.len() > super::MAX_DECOMPRESSED_SIZE {
-                    tracing::warn!("decompressed remote write body exceeds 64 MiB limit");
-                    return StatusCode::BAD_REQUEST;
-                }
-                d
+        match super::decode_snappy_body(&body) {
+            Ok(d) => d,
+            Err(super::IngestError::PayloadTooLarge) => {
+                tracing::warn!("decompressed remote write body exceeds 64 MiB limit");
+                return StatusCode::BAD_REQUEST;
             }
             Err(_) => body.to_vec(),
         }
@@ -129,6 +125,18 @@ pub async fn remote_write_handler(
 
     // Acquire write lock and ingest
     let mut store = state.metric_store.write();
+    for (name, _, _) in &prepared {
+        if let Err(e) = store.check_metric_name_collision(name, name) {
+            tracing::warn!("rejecting remote write ingest: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    }
+    for (name, _, _) in &prepared {
+        if let Err(e) = store.register_metric_name(name, name) {
+            tracing::warn!("rejecting remote write ingest: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    }
     for (name, labels, samples) in prepared {
         store.ingest_samples(&name, labels, samples);
     }

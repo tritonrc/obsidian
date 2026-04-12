@@ -51,7 +51,7 @@ pub async fn metrics_handler(
         }
     };
 
-    type MetricData = (String, Vec<(String, String)>, Vec<Sample>);
+    type MetricData = (String, String, Vec<(String, String)>, Vec<Sample>);
     let mut prepared: Vec<MetricData> = Vec::new();
 
     for resource_metrics in &request.resource_metrics {
@@ -72,6 +72,7 @@ pub async fn metrics_handler(
                             let ts_ms = dp.time_unix_nano as i64 / 1_000_000;
                             prepared.push((
                                 metric_name.clone(),
+                                metric.name.clone(),
                                 labels,
                                 vec![Sample {
                                     timestamp_ms: ts_ms,
@@ -87,6 +88,7 @@ pub async fn metrics_handler(
                             let ts_ms = dp.time_unix_nano as i64 / 1_000_000;
                             prepared.push((
                                 metric_name.clone(),
+                                metric.name.clone(),
                                 labels,
                                 vec![Sample {
                                     timestamp_ms: ts_ms,
@@ -114,6 +116,7 @@ pub async fn metrics_handler(
                                 let bucket_name = format!("{}_bucket", metric_name);
                                 prepared.push((
                                     bucket_name,
+                                    format!("{}_bucket", metric.name),
                                     labels,
                                     vec![Sample {
                                         timestamp_ms: ts_ms,
@@ -125,6 +128,7 @@ pub async fn metrics_handler(
                             // Store _sum and _count
                             prepared.push((
                                 format!("{}_sum", metric_name),
+                                format!("{}_sum", metric.name),
                                 base_labels.clone(),
                                 vec![Sample {
                                     timestamp_ms: ts_ms,
@@ -133,6 +137,7 @@ pub async fn metrics_handler(
                             ));
                             prepared.push((
                                 format!("{}_count", metric_name),
+                                format!("{}_count", metric.name),
                                 base_labels,
                                 vec![Sample {
                                     timestamp_ms: ts_ms,
@@ -158,6 +163,7 @@ pub async fn metrics_handler(
                                 labels.push(("quantile".to_string(), format!("{}", qv.quantile)));
                                 prepared.push((
                                     metric_name.clone(),
+                                    metric.name.clone(),
                                     labels,
                                     vec![Sample {
                                         timestamp_ms: ts_ms,
@@ -169,6 +175,7 @@ pub async fn metrics_handler(
                             // Store _sum and _count
                             prepared.push((
                                 format!("{}_sum", metric_name),
+                                format!("{}_sum", metric.name),
                                 base_labels.clone(),
                                 vec![Sample {
                                     timestamp_ms: ts_ms,
@@ -177,6 +184,7 @@ pub async fn metrics_handler(
                             ));
                             prepared.push((
                                 format!("{}_count", metric_name),
+                                format!("{}_count", metric.name),
                                 base_labels,
                                 vec![Sample {
                                     timestamp_ms: ts_ms,
@@ -194,10 +202,33 @@ pub async fn metrics_handler(
     }
 
     let series_count = prepared.len();
-    let sample_count: usize = prepared.iter().map(|(_, _, samples)| samples.len()).sum();
+    let sample_count: usize = prepared
+        .iter()
+        .map(|(_, _, _, samples)| samples.len())
+        .sum();
 
     let mut store = state.metric_store.write();
-    for (name, labels, samples) in prepared {
+    for (name, source_name, _, _) in &prepared {
+        if let Err(e) = store.check_metric_name_collision(name, source_name) {
+            tracing::warn!("rejecting OTLP metric ingest: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+    for (name, source_name, _, _) in &prepared {
+        if let Err(e) = store.register_metric_name(name, source_name) {
+            tracing::warn!("rejecting OTLP metric ingest: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+    for (name, _, labels, samples) in prepared {
         store.ingest_samples(&name, labels, samples);
     }
 

@@ -84,6 +84,8 @@ To listen on all interfaces (e.g. when running in a container or accepting traff
 obsidian --bind-address 0.0.0.0 --port 4320
 ```
 
+Obsidian disables permissive browser CORS by default. If you expose it beyond loopback, treat it as an unauthenticated internal service and front it with your own network controls or proxy.
+
 ---
 
 ## Ingestion

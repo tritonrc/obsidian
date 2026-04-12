@@ -1,6 +1,6 @@
 //! Loki push API handler for log ingestion.
 //!
-//! Accepts JSON and protobuf+snappy encoded log pushes.
+//! Accepts JSON and snappy-compressed JSON log pushes.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -114,15 +114,8 @@ pub async fn push_handler(
 /// Loki's native protobuf push format uses its own proto definitions (not OTLP).
 /// We don't implement that -- this path only handles snappy-compressed JSON.
 fn decode_snappy_json(body: &[u8]) -> Result<LokiPushRequest, anyhow::Error> {
-    let decompressed = snap::raw::Decoder::new()
-        .decompress_vec(body)
-        .map_err(|e| anyhow::anyhow!("snappy decompress failed: {}", e))?;
-
-    if decompressed.len() > super::MAX_DECOMPRESSED_SIZE {
-        return Err(anyhow::anyhow!(
-            "decompressed body exceeds maximum size of 64 MiB"
-        ));
-    }
+    let decompressed = super::decode_snappy_body(body)
+        .map_err(|e| anyhow::anyhow!("failed to decode snappy body: {}", e))?;
 
     serde_json::from_slice(&decompressed)
         .map_err(|e| anyhow::anyhow!("failed to parse decompressed push: {}", e))

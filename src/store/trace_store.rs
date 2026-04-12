@@ -50,7 +50,7 @@ pub struct TraceResult {
 }
 
 /// In-memory trace storage with indexes.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceStore {
     /// trace_id -> list of spans.
     pub traces: FxHashMap<[u8; 16], Vec<Span>>,

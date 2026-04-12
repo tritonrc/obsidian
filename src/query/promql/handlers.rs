@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::eval::{PromQLResult, SeriesResult, evaluate_instant, evaluate_range};
 use crate::store::SharedState;
-use crate::store::log_store::{LabelMatchOp, LabelMatcher};
+use crate::store::{LabelMatchOp, LabelMatcher};
 
 /// Hint included in PromQL parse error responses to help agents construct valid queries.
 const PROMQL_HINT: &str = "Example: rate(http_requests_total[5m])";

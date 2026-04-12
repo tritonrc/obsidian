@@ -105,7 +105,7 @@ pub async fn search(
 
     // Filter traces by time range: keep only those with at least one span
     // whose time window overlaps [start_ns, end_ns].
-    let results: Vec<_> = results
+    let mut results: Vec<_> = results
         .into_iter()
         .filter(|r| {
             r.matched_spans.iter().any(|s| {
@@ -116,6 +116,10 @@ pub async fn search(
             })
         })
         .collect();
+
+    if let Some(limit) = params.limit {
+        results.truncate(limit);
+    }
 
     let traces: Vec<Value> = results
         .iter()

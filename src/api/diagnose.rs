@@ -15,8 +15,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::store::SharedState;
-use crate::store::log_store::{LabelMatchOp, LabelMatcher};
 use crate::store::trace_store::SpanStatus;
+use crate::store::{LabelMatchOp, LabelMatcher};
 
 /// Query parameters for the diagnose endpoint.
 #[derive(Debug, Deserialize)]

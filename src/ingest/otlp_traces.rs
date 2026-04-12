@@ -18,6 +18,27 @@ use super::{decode_body, is_json_content_type};
 use crate::store::SharedState;
 use crate::store::trace_store::{AttributeValue, Span, SpanStatus};
 
+#[derive(Debug, Clone)]
+enum PreparedAttributeValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSpan {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    parent_span_id: Option<[u8; 8]>,
+    name: String,
+    service_name: String,
+    start_time_ns: i64,
+    duration_ns: i64,
+    status: SpanStatus,
+    attributes: SmallVec<[(String, PreparedAttributeValue); 8]>,
+}
+
 /// Handler for POST /v1/traces.
 ///
 /// Accepts both protobuf (`application/x-protobuf`, default) and JSON
@@ -53,7 +74,7 @@ pub async fn traces_handler(
         }
     };
 
-    let mut store = state.trace_store.write();
+    let mut prepared_batches: Vec<Vec<PreparedSpan>> = Vec::new();
     let mut trace_ids = FxHashSet::default();
     let mut total_spans: usize = 0;
 
@@ -65,17 +86,14 @@ pub async fn traces_handler(
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Pre-intern resource attributes once per resource_spans block
-        let resource_attrs: SmallVec<[(lasso::Spur, AttributeValue); 8]> = resource_labels
+        let resource_attrs: SmallVec<[(String, PreparedAttributeValue); 8]> = resource_labels
             .iter()
             .map(|(k, v)| {
-                let key = store.interner.get_or_intern(format!("resource.{}", k));
-                let val = AttributeValue::String(store.interner.get_or_intern(v));
+                let key = format!("resource.{}", k);
+                let val = PreparedAttributeValue::String(v.clone());
                 (key, val)
             })
             .collect();
-
-        let service_spur = store.interner.get_or_intern(&service_name);
 
         for scope_spans in &resource_spans.scope_spans {
             let mut spans = Vec::with_capacity(scope_spans.spans.len());
@@ -109,8 +127,6 @@ pub async fn traces_handler(
                     otlp_span.parent_span_id.as_slice().try_into().ok()
                 };
 
-                let name_spur = store.interner.get_or_intern(&otlp_span.name);
-
                 let status = match &otlp_span.status {
                     Some(s) => match s.code {
                         0 => SpanStatus::Unset,
@@ -124,26 +140,25 @@ pub async fn traces_handler(
                 let duration_ns =
                     otlp_span.end_time_unix_nano as i64 - otlp_span.start_time_unix_nano as i64;
 
-                let mut attributes: SmallVec<[(lasso::Spur, AttributeValue); 8]> =
-                    resource_attrs.clone();
+                let mut attributes = resource_attrs.clone();
 
                 // Add span attributes
                 for attr in &otlp_span.attributes {
                     if let Some(val) = &attr.value {
-                        let key = store.interner.get_or_intern(format!("span.{}", attr.key));
-                        if let Some(av) = convert_any_value(&mut store.interner, val) {
+                        let key = format!("span.{}", attr.key);
+                        if let Some(av) = convert_any_value(val) {
                             attributes.push((key, av));
                         }
                     }
                 }
 
                 trace_ids.insert(trace_id);
-                spans.push(Span {
+                spans.push(PreparedSpan {
                     trace_id,
                     span_id,
                     parent_span_id,
-                    name: name_spur,
-                    service_name: service_spur,
+                    name: otlp_span.name.clone(),
+                    service_name: service_name.clone(),
                     start_time_ns: otlp_span.start_time_unix_nano as i64,
                     duration_ns,
                     status,
@@ -152,8 +167,17 @@ pub async fn traces_handler(
             }
 
             total_spans += spans.len();
-            store.ingest_spans(spans);
+            prepared_batches.push(spans);
         }
+    }
+
+    let mut store = state.trace_store.write();
+    for prepared_batch in prepared_batches {
+        let spans: Vec<Span> = prepared_batch
+            .into_iter()
+            .map(|prepared| intern_prepared_span(&mut store, prepared))
+            .collect();
+        store.ingest_spans(spans);
     }
 
     Json(serde_json::json!({
@@ -166,16 +190,46 @@ pub async fn traces_handler(
 }
 
 fn convert_any_value(
-    interner: &mut lasso::Rodeo,
     val: &opentelemetry_proto::tonic::common::v1::AnyValue,
-) -> Option<AttributeValue> {
+) -> Option<PreparedAttributeValue> {
     match &val.value {
-        Some(any_value::Value::StringValue(s)) => {
-            Some(AttributeValue::String(interner.get_or_intern(s)))
-        }
-        Some(any_value::Value::IntValue(i)) => Some(AttributeValue::Int(*i)),
-        Some(any_value::Value::DoubleValue(f)) => Some(AttributeValue::Float(*f)),
-        Some(any_value::Value::BoolValue(b)) => Some(AttributeValue::Bool(*b)),
+        Some(any_value::Value::StringValue(s)) => Some(PreparedAttributeValue::String(s.clone())),
+        Some(any_value::Value::IntValue(i)) => Some(PreparedAttributeValue::Int(*i)),
+        Some(any_value::Value::DoubleValue(f)) => Some(PreparedAttributeValue::Float(*f)),
+        Some(any_value::Value::BoolValue(b)) => Some(PreparedAttributeValue::Bool(*b)),
         _ => None,
+    }
+}
+
+fn intern_prepared_span(store: &mut crate::store::TraceStore, prepared: PreparedSpan) -> Span {
+    let name = store.interner.get_or_intern(&prepared.name);
+    let service_name = store.interner.get_or_intern(&prepared.service_name);
+    let attributes = prepared
+        .attributes
+        .into_iter()
+        .map(|(key, value)| {
+            let key = store.interner.get_or_intern(key);
+            let value = match value {
+                PreparedAttributeValue::String(s) => {
+                    AttributeValue::String(store.interner.get_or_intern(s))
+                }
+                PreparedAttributeValue::Int(i) => AttributeValue::Int(i),
+                PreparedAttributeValue::Float(f) => AttributeValue::Float(f),
+                PreparedAttributeValue::Bool(b) => AttributeValue::Bool(b),
+            };
+            (key, value)
+        })
+        .collect();
+
+    Span {
+        trace_id: prepared.trace_id,
+        span_id: prepared.span_id,
+        parent_span_id: prepared.parent_span_id,
+        name,
+        service_name,
+        start_time_ns: prepared.start_time_ns,
+        duration_ns: prepared.duration_ns,
+        status: prepared.status,
+        attributes,
     }
 }

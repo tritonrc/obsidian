@@ -23,6 +23,10 @@ pub enum IngestError {
     #[error("gzip decompression failed: {0}")]
     GzipDecompression(#[from] std::io::Error),
 
+    /// Snappy decompression of the request body failed.
+    #[error("snappy decompression failed: {0}")]
+    SnappyDecompression(#[from] snap::Error),
+
     /// Decompressed body exceeds the maximum allowed size.
     #[error("decompressed body exceeds maximum size of 64 MiB")]
     PayloadTooLarge,
@@ -48,6 +52,19 @@ pub fn decode_body<'a>(headers: &HeaderMap, body: &'a Bytes) -> Result<Cow<'a, [
     } else {
         Ok(Cow::Borrowed(body.as_ref()))
     }
+}
+
+/// Decode a Snappy-compressed request body with a pre-allocation size check.
+pub fn decode_snappy_body(body: &[u8]) -> Result<Vec<u8>, IngestError> {
+    let decompressed_len = snap::raw::decompress_len(body)?;
+    if decompressed_len > MAX_DECOMPRESSED_SIZE {
+        return Err(IngestError::PayloadTooLarge);
+    }
+
+    let mut decompressed = vec![0; decompressed_len];
+    let written = snap::raw::Decoder::new().decompress(body, &mut decompressed)?;
+    decompressed.truncate(written);
+    Ok(decompressed)
 }
 
 /// Check if the Content-Type header indicates JSON encoding.
@@ -117,5 +134,12 @@ mod tests {
     fn test_max_decompressed_size_is_64_mib() {
         assert_eq!(MAX_DECOMPRESSED_SIZE, 64 * 1024 * 1024);
         assert_eq!(MAX_DECOMPRESSED_SIZE, 67_108_864);
+    }
+
+    #[test]
+    fn test_snappy_body_rejects_large_declared_size_before_allocating() {
+        let compressed = vec![0x81, 0x80, 0x80, 0x20];
+        let err = decode_snappy_body(&compressed).expect_err("should reject >64MiB payload");
+        assert!(matches!(err, IngestError::PayloadTooLarge));
     }
 }

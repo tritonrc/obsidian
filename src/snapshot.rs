@@ -24,9 +24,9 @@ pub fn save_snapshot(
     dir: &Path,
 ) -> Result<()> {
     save_snapshot_owned(
-        clone_log_store(log_store)?,
-        clone_metric_store(metric_store)?,
-        clone_trace_store(trace_store)?,
+        log_store.clone(),
+        metric_store.clone(),
+        trace_store.clone(),
         dir,
     )
 }
@@ -65,7 +65,14 @@ pub fn save_snapshot_owned(
 pub fn load_snapshot(dir: &Path) -> Result<(LogStore, MetricStore, TraceStore)> {
     let path = dir.join("obsidian.snap");
     let bytes = fs::read(&path)?;
-    let snapshot: Snapshot = bincode::deserialize(&bytes)?;
+    let mut snapshot: Snapshot = bincode::deserialize(&bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "snapshot deserialization failed (snapshot format may be incompatible with this build): {}",
+            e
+        )
+    })?;
+    snapshot.log_store.rebuild_stream_ids();
+    snapshot.metric_store.rebuild_series_ids();
     tracing::info!("snapshot restored from {}", path.display());
     Ok((
         snapshot.log_store,
@@ -74,37 +81,22 @@ pub fn load_snapshot(dir: &Path) -> Result<(LogStore, MetricStore, TraceStore)> 
     ))
 }
 
-/// Clone a LogStore via serialize/deserialize to get a deep clone including the Rodeo interner.
-pub fn clone_log_store(store: &LogStore) -> Result<LogStore> {
-    let bytes = bincode::serialize(store)?;
-    Ok(bincode::deserialize(&bytes)?)
-}
-
-/// Clone a MetricStore via serialize/deserialize.
-pub fn clone_metric_store(store: &MetricStore) -> Result<MetricStore> {
-    let bytes = bincode::serialize(store)?;
-    Ok(bincode::deserialize(&bytes)?)
-}
-
-/// Clone a TraceStore via serialize/deserialize.
-pub fn clone_trace_store(store: &TraceStore) -> Result<TraceStore> {
-    let bytes = bincode::serialize(store)?;
-    Ok(bincode::deserialize(&bytes)?)
-}
-
 /// Clone all stores and save a snapshot. Acquires read locks briefly to clone,
 /// then writes to disk without holding any locks.
 pub fn save_from_state(state: &crate::store::AppState, dir: &std::path::Path) {
-    let ls = clone_log_store(&state.log_store.read());
-    let ms = clone_metric_store(&state.metric_store.read());
-    let ts = clone_trace_store(&state.trace_store.read());
-    match (ls, ms, ts) {
-        (Ok(ls), Ok(ms), Ok(ts)) => {
-            if let Err(e) = save_snapshot_owned(ls, ms, ts, dir) {
-                tracing::error!("snapshot failed: {}", e);
-            }
-        }
-        _ => tracing::error!("snapshot failed: could not clone stores"),
+    let snapshot = Snapshot {
+        log_store: state.log_store.read().clone(),
+        metric_store: state.metric_store.read().clone(),
+        trace_store: state.trace_store.read().clone(),
+    };
+
+    if let Err(e) = save_snapshot_owned(
+        snapshot.log_store,
+        snapshot.metric_store,
+        snapshot.trace_store,
+        dir,
+    ) {
+        tracing::error!("snapshot failed: {}", e);
     }
 }
 

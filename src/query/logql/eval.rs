@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 
-use crate::store::log_store::{LabelMatchOp, LabelMatcher, LogStore};
+use crate::store::log_store::LogStore;
+use crate::store::{LabelMatchOp, LabelMatcher};
 
 use super::parser::{LogQLExpr, MatchOp, MetricFunc, PipelineStage};
 

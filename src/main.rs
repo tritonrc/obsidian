@@ -24,6 +24,16 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::parse();
 
+    if config.bind_address != "127.0.0.1"
+        && config.bind_address != "::1"
+        && config.bind_address != "localhost"
+    {
+        tracing::warn!(
+            bind_address = %config.bind_address,
+            "binding beyond loopback exposes an unauthenticated observability service; use trusted network controls"
+        );
+    }
+
     // Initialize stores
     let (log_store, metric_store, trace_store) = if config.restore {
         let snap_dir = PathBuf::from(&config.snapshot_dir);

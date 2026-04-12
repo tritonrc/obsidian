@@ -2,7 +2,6 @@
 
 use axum::Router;
 use axum::routing::{delete, get, post};
-use tower_http::cors::CorsLayer;
 
 use crate::api;
 use crate::ingest;
@@ -59,9 +58,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/v1/reset", delete(api::reset::reset))
         .route("/api/v1/services", get(api::services::list_services))
         .route("/api/v1/status", get(api::status::status))
+        .route("/api/v1/summary", get(api::summary::summary))
         .route("/api/v1/metadata", get(api::metadata::metadata))
         .route("/api/v1/openapi.json", get(api::openapi::openapi_spec))
         .route("/ready", get(api::health::ready))
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
