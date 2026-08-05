@@ -81,8 +81,8 @@ Registry on every release:
 docker run --rm -p 4320:4320 ghcr.io/tritonrc/aniani:latest
 ```
 
-Tags: `:latest` and `:0.13.2` / `:0.13` for releases, `:edge` for the current
-`master`. The image is a statically linked binary on `scratch` — no shell, no
+Tags: `:latest` and `:0.13.2` / `:0.13` for releases, `:edge` for `master` once
+its tests pass. The image is a statically linked binary on `scratch` — no shell, no
 package manager — running as uid 65532. It defaults to `--bind-address 0.0.0.0`
 (the binary's own `127.0.0.1` default is unreachable from outside a container)
 and keeps snapshots in `/data`:
