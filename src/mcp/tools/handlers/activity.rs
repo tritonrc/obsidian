@@ -3,7 +3,8 @@ use serde_json::{Value, json};
 use super::common::require_known_service;
 use crate::mcp::synth;
 use crate::mcp::tools::args::{
-    DescribeServiceArgs, Detail, ResetArgs, ResetScope, SummarizeActivityArgs,
+    CheckHealthArgs, DescribeServiceArgs, Detail, ListServicesArgs, MarkCheckpointArgs, ResetArgs,
+    ResetScope, SummarizeActivityArgs,
 };
 use crate::mcp::tools::dispatch::{tool_err, tool_ok};
 use crate::store::SharedState;
@@ -46,6 +47,7 @@ pub(in crate::mcp::tools) fn handle_reset(
 pub(in crate::mcp::tools) fn handle_mark_checkpoint(
     state: &SharedState,
     id: Option<Value>,
+    _args: &MarkCheckpointArgs,
 ) -> Value {
     let checkpoint = state.ingest_seq.load(std::sync::atomic::Ordering::Relaxed);
     tool_ok(
@@ -63,7 +65,7 @@ pub(in crate::mcp::tools) fn handle_summarize_activity(
     if let Err(e) = require_known_service(state, &id, &args.service) {
         return e;
     }
-    let detail = matches!(args.detail, Some(Detail::Detailed));
+    let detail = args.detail.is_some_and(Detail::wants_extras);
     let activity = synth::summarize_activity(state, &args.service, args.since, detail);
     let text = activity.summary.clone();
     match serde_json::to_value(&activity) {
@@ -72,7 +74,11 @@ pub(in crate::mcp::tools) fn handle_summarize_activity(
     }
 }
 
-pub(in crate::mcp::tools) fn handle_check_health(state: &SharedState, id: Option<Value>) -> Value {
+pub(in crate::mcp::tools) fn handle_check_health(
+    state: &SharedState,
+    id: Option<Value>,
+    _args: &CheckHealthArgs,
+) -> Value {
     let overview = synth::check_health(state);
     let text = match overview.services.first() {
         Some(worst) => format!(
@@ -111,7 +117,11 @@ pub(in crate::mcp::tools) fn handle_describe_service(
     }
 }
 
-pub(in crate::mcp::tools) fn handle_list_services(state: &SharedState, id: Option<Value>) -> Value {
+pub(in crate::mcp::tools) fn handle_list_services(
+    state: &SharedState,
+    id: Option<Value>,
+    _args: &ListServicesArgs,
+) -> Value {
     use rustc_hash::{FxHashMap, FxHashSet};
 
     let mut sig: FxHashMap<String, FxHashSet<&str>> = FxHashMap::default();

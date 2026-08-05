@@ -83,8 +83,8 @@ src/
 │   │   ├── args/        # one typed struct per tool — the source of both inputSchema and deserialization
 │   │   │   ├── mod.rs   # the 10 tool_args! declarations; add a tool's arguments here
 │   │   │   └── schema.rs # tool_args!/str_enum! macros, schema generation, argument validation
-│   │   ├── descriptors.rs
-│   │   ├── dispatch.rs
+│   │   ├── registry.rs  # the tool table: name → args type → handler → advertised metadata, once each
+│   │   ├── dispatch.rs  # tools/call request shape + typed arg parsing, then hands off to the table
 │   │   └── handlers/
 │   └── synth/           # transport-free typed cores (summarize_activity, check_health, describe_service, trace tree)
 │       ├── mod.rs       # public synth surface
@@ -114,13 +114,19 @@ tool_args! {
     struct QueryTracesArgs for "query_traces" {
         service: Option<String>,   // Option<T> → optional
         status: Option<TraceStatus>, // str_enum! type → advertises its own values
-        limit: Option<u64>,        // u64 → advertises minimum: 0
+        limit: Option<u64>,        // u64 → advertises minimum/maximum
         traceql: Option<String>,
     }
 }
 ```
 
-That one declaration generates the `inputSchema` in `descriptors.rs` and the validator that rejects a bad call, so the advertised contract and the handler cannot disagree. Two consequences to expect: a field no handler reads is a `field is never read` build failure (that is intentional — an argument accepted and ignored is invisible to the caller), and a closed value set belongs in a `str_enum!` rather than a string comparison in the handler. Keep semantic validation — duration parsing, hex length, "does this service exist" — in the handler.
+Then add one entry to the table in `registry.rs`, which is the only place a tool name appears:
+
+```rust
+"query_traces"(QueryTracesArgs) => handle_query_traces { "title": ..., "description": ..., ... },
+```
+
+The entry that advertises the schema is the entry that dispatches, so a tool cannot advertise a contract it does not honor — mismatching them is a type error. Three consequences to expect: a field no handler touches is a `field is never read` build failure (intentional — an argument accepted and ignored is invisible to the caller, though the lint cannot tell reading from applying, so deliberate non-use like `query_logs`' raw-`logql` branch is fine); a closed value set belongs in a `str_enum!` matched exhaustively, not a string comparison that falls through to a default; and only `String`, `u64`, `str_enum!` types, and `Option` of those are supported field types — anything else needs a deliberate `ArgType` impl. Keep semantic validation — duration parsing, hex length, "does this service exist" — in the handler.
 
 ### Naming
 

@@ -22,7 +22,7 @@ pub(in crate::mcp::tools) fn handle_get_trace(
             Err(_) => return tool_err(id, "trace_id is not valid hex".into()),
         }
     }
-    let detailed = matches!(args.detail, Some(Detail::Detailed));
+    let detailed = args.detail.is_some_and(Detail::wants_extras);
     match synth::build_trace_tree(state, &bytes, detailed) {
         Some(tree) => {
             let text = format!(

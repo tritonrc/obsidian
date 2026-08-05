@@ -34,10 +34,13 @@ impl ArgType for String {
 }
 
 /// Every integer argument is a count or a checkpoint token, so the advertised
-/// lower bound is the one `u64` can hold — and the one [`problem`] enforces.
+/// range is exactly what `u64` can hold — and exactly what [`problem`] enforces.
+/// Both bounds are stated so a client validating against `tools/list` refuses the
+/// same values the server does, rather than being told an out-of-range number is
+/// acceptable and learning otherwise at call time.
 impl ArgType for u64 {
     fn arg_schema() -> Value {
-        json!({ "type": "integer", "minimum": 0 })
+        json!({ "type": "integer", "minimum": 0, "maximum": u64::MAX })
     }
 }
 
@@ -57,6 +60,13 @@ impl<T: ArgType> ArgType for Option<T> {
 /// A field's written type decides everything about it — `Option<T>` is optional,
 /// anything else is `required`, and `T`'s [`ArgType`] supplies the value schema.
 /// There is no second place to update, which is the point.
+///
+/// Supported field types are `String`, `u64`, a [`str_enum!`] type, and `Option`
+/// of any of those. Anything else fails to compile for want of an [`ArgType`]
+/// impl, which is the intended outcome — a new type needs a deliberate decision
+/// about the schema it advertises, not a silently wrong one. Field names come
+/// from `stringify!`, so a raw identifier like `r#type` would advertise the raw
+/// spelling; give such a field a plain name instead.
 ///
 /// Expands against `ArgType`, `ToolArgs`, and `serde` being in scope at the use
 /// site (they are in [`super`], the only intended one).
@@ -325,7 +335,7 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 0, "maximum": u64::MAX },
                     "mode": { "type": "string", "enum": ["fast", "slow"] }
                 },
                 "additionalProperties": false,

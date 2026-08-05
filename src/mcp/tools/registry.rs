@@ -1,10 +1,67 @@
+//! The tool table: every tool named exactly once, bound to its argument type,
+//! its handler, and the metadata `tools/list` advertises.
+//!
+//! Keeping all four in one entry is what makes the advertised contract and the
+//! executed call the same thing. When the name was written once in a descriptor
+//! and again in a dispatch match, a tool could advertise another tool's
+//! `inputSchema` and still deserialize its own — the client would be told a key
+//! was valid and then told it was unknown. There is now no second place to
+//! disagree with.
+
 use serde_json::{Value, json};
 
 use super::args::{
     CheckHealthArgs, DescribeServiceArgs, GetTraceArgs, ListServicesArgs, MarkCheckpointArgs,
     QueryLogsArgs, QueryMetricsArgs, QueryTracesArgs, ResetArgs, SummarizeActivityArgs, ToolArgs,
 };
+use super::dispatch::with_args;
+use super::handlers::{
+    handle_check_health, handle_describe_service, handle_get_trace, handle_list_services,
+    handle_mark_checkpoint, handle_query_logs, handle_query_metrics, handle_query_traces,
+    handle_reset, handle_summarize_activity,
+};
 use crate::mcp::protocol;
+use crate::store::SharedState;
+
+/// Declare the tool table: `"name"(ArgsType) => handler { ..advertised metadata }`.
+///
+/// The name is a literal so it can serve as both the advertised `name` and the
+/// dispatch pattern, which is the whole point — one occurrence per tool. The
+/// `inputSchema` is generated from the argument type that same entry dispatches
+/// through, so the two cannot describe different things.
+macro_rules! tools {
+    (
+        $( $name:literal ( $args:ty ) => $handler:path { $($meta:tt)* } ),* $(,)?
+    ) => {
+        /// Every tool descriptor, for `tools/list`.
+        fn descriptors() -> Vec<Value> {
+            vec![
+                $( json!({
+                    "name": $name,
+                    "inputSchema": <$args as ToolArgs>::schema(),
+                    $($meta)*
+                }) ),*
+            ]
+        }
+
+        /// Run the named tool, or `None` if no such tool exists.
+        pub(super) fn dispatch(
+            state: &SharedState,
+            id: Option<Value>,
+            name: &str,
+            args: &Value,
+        ) -> Option<Value> {
+            match name {
+                $(
+                    $name => Some(with_args(id, args, |id, a: &$args| {
+                        $handler(state, id, a)
+                    })),
+                )*
+                _ => None,
+            }
+        }
+    };
+}
 
 /// Server-level instructions injected at `initialize` (the agent loop).
 pub const INSTRUCTIONS: &str = "\
@@ -22,14 +79,10 @@ fn read_only(title: &str) -> Value {
     json!({ "title": title, "readOnlyHint": true, "openWorldHint": false, "idempotentHint": true })
 }
 
-/// Build the static list of tool descriptors.
-fn descriptors() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "reset",
+tools! {
+    "reset"(ResetArgs) => handle_reset {
             "title": "Reset Telemetry Store",
             "description": "Clear telemetry. scope='all' wipes everything; scope='service' clears one service (requires `service`). The only write tool. Returns a fresh checkpoint token.",
-            "inputSchema": ResetArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -40,24 +93,20 @@ fn descriptors() -> Vec<Value> {
                 "required": ["scope", "checkpoint"]
             },
             "annotations": { "title": "Reset Telemetry Store", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false }
-        }),
-        json!({
-            "name": "mark_checkpoint",
+    },
+    "mark_checkpoint"(MarkCheckpointArgs) => handle_mark_checkpoint {
             "title": "Mark Checkpoint",
             "description": "Return an opaque monotonic checkpoint token for 'now'. Pass it later as `since` to scope a summary to telemetry ingested after this point. Not a wall-clock time.",
-            "inputSchema": MarkCheckpointArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": { "checkpoint": { "type": "integer" } },
                 "required": ["checkpoint"]
             },
             "annotations": read_only("Mark Checkpoint")
-        }),
-        json!({
-            "name": "summarize_activity",
+    },
+    "summarize_activity"(SummarizeActivityArgs) => handle_summarize_activity {
             "title": "Summarize Service Activity",
             "description": "Triage one service: error logs, failing/slow traces, error metrics, health score, one-line summary. Use after a run to see what it produced. Pass `since` (a checkpoint token) to scope to the latest run. Use this BEFORE drilling in with query_* tools.",
-            "inputSchema": SummarizeActivityArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -74,24 +123,20 @@ fn descriptors() -> Vec<Value> {
                 "required": ["service", "health_score", "summary"]
             },
             "annotations": read_only("Summarize Service Activity")
-        }),
-        json!({
-            "name": "check_health",
+    },
+    "check_health"(CheckHealthArgs) => handle_check_health {
             "title": "Check Global Health",
             "description": "Rank every known service by health, worst first. Use when you don't yet know which service is in trouble.",
-            "inputSchema": CheckHealthArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": { "services": { "type": "array", "items": { "type": "object" } } },
                 "required": ["services"]
             },
             "annotations": read_only("Check Global Health")
-        }),
-        json!({
-            "name": "query_logs",
+    },
+    "query_logs"(QueryLogsArgs) => handle_query_logs {
             "title": "Query Logs",
             "description": "Fetch log lines. Provide structured filters (service, level, contains) OR a raw `logql` string (e.g. {service=\"api\"} |= \"error\"). If `logql` is set, structured filters are ignored. To scope to a run, reset first, then query; summarize_activity is the checkpoint-accurate run summary.",
-            "inputSchema": QueryLogsArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -103,12 +148,10 @@ fn descriptors() -> Vec<Value> {
                 "required": ["logs", "shown", "total_count", "truncated"]
             },
             "annotations": read_only("Query Logs")
-        }),
-        json!({
-            "name": "query_traces",
+    },
+    "query_traces"(QueryTracesArgs) => handle_query_traces {
             "title": "Query Traces",
             "description": "Find traces. Provide structured filters (service, name, status, min_duration) OR a raw `traceql` string. If `traceql` is set, structured filters are ignored.",
-            "inputSchema": QueryTracesArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -120,12 +163,10 @@ fn descriptors() -> Vec<Value> {
                 "required": ["traces", "shown", "total_count", "truncated"]
             },
             "annotations": read_only("Query Traces")
-        }),
-        json!({
-            "name": "query_metrics",
+    },
+    "query_metrics"(QueryMetricsArgs) => handle_query_metrics {
             "title": "Query Metrics",
             "description": "Run a raw PromQL query (e.g. rate(http_requests_total[5m])). For a range query pass all of start/end (unix seconds, or ms/ns) and step (a duration like 15s or 1m); omit all three for an instant query at now.",
-            "inputSchema": QueryMetricsArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -134,12 +175,10 @@ fn descriptors() -> Vec<Value> {
                 }
             },
             "annotations": read_only("Query Metrics")
-        }),
-        json!({
-            "name": "get_trace",
+    },
+    "get_trace"(GetTraceArgs) => handle_get_trace {
             "title": "Get Trace Tree",
             "description": "Return one trace as a parent/child span tree. `trace_id` is 32 hex chars. Use `detail=detailed` to include span attributes.",
-            "inputSchema": GetTraceArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -149,24 +188,20 @@ fn descriptors() -> Vec<Value> {
                 "required": ["trace_id", "roots"]
             },
             "annotations": read_only("Get Trace Tree")
-        }),
-        json!({
-            "name": "list_services",
+    },
+    "list_services"(ListServicesArgs) => handle_list_services {
             "title": "List Services",
             "description": "List every service reporting telemetry and which signals (logs/metrics/traces) each has.",
-            "inputSchema": ListServicesArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": { "services": { "type": "array", "items": { "type": "object" } } },
                 "required": ["services"]
             },
             "annotations": read_only("List Services")
-        }),
-        json!({
-            "name": "describe_service",
+    },
+    "describe_service"(DescribeServiceArgs) => handle_describe_service {
             "title": "Describe Service",
             "description": "Catalog a service's queryable surface: metric names, log label keys + values, span attribute keys. Call this before writing a raw logql/promql/traceql query.",
-            "inputSchema": DescribeServiceArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -178,8 +213,7 @@ fn descriptors() -> Vec<Value> {
                 "required": ["service"]
             },
             "annotations": read_only("Describe Service")
-        }),
-    ]
+    },
 }
 
 pub fn list(id: Option<Value>) -> Value {
@@ -191,32 +225,57 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Every advertised schema must be the one its argument type generates. A
-    /// descriptor that spelled its own schema out again — which is how this file
-    /// used to read — could describe a property no handler has a field for.
+    /// Every advertised tool must actually dispatch, and every advertised
+    /// argument must survive the round trip through the type that entry
+    /// dispatches to. This walks `tools/list` rather than a hand-kept list, so it
+    /// cannot fall out of step with the table the way a third copy of the
+    /// name-to-type mapping would.
     #[test]
-    fn every_advertised_schema_is_the_one_its_argument_type_generates() {
-        let resp = list(Some(json!(1)));
-        let generated: Vec<(&str, Value)> = vec![
-            ("reset", ResetArgs::schema()),
-            ("mark_checkpoint", MarkCheckpointArgs::schema()),
-            ("summarize_activity", SummarizeActivityArgs::schema()),
-            ("check_health", CheckHealthArgs::schema()),
-            ("query_logs", QueryLogsArgs::schema()),
-            ("query_traces", QueryTracesArgs::schema()),
-            ("query_metrics", QueryMetricsArgs::schema()),
-            ("get_trace", GetTraceArgs::schema()),
-            ("list_services", ListServicesArgs::schema()),
-            ("describe_service", DescribeServiceArgs::schema()),
-        ];
-        let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(generated.len(), tools.len(), "a tool has no argument type");
-        for (name, schema) in generated {
-            let tool = tools.iter().find(|t| t["name"] == name).unwrap();
-            assert_eq!(
-                tool["inputSchema"], schema,
-                "{name} advertises its own schema"
-            );
+    fn every_advertised_tool_dispatches_with_its_advertised_arguments() {
+        let state = crate::store::empty_test_state();
+        for tool in list(Some(json!(1)))["result"]["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            let args: Value = props
+                .iter()
+                .map(|(key, spec)| (key.clone(), schema_valid_value(spec)))
+                .collect::<serde_json::Map<String, Value>>()
+                .into();
+            let resp = dispatch(&state, Some(json!(1)), name, &args)
+                .unwrap_or_else(|| panic!("{name} is advertised but does not dispatch"));
+            // The call may well fail on semantics — an empty store knows no
+            // services, and "x" is not a trace id. It must not fail on the shape
+            // of the arguments the server itself advertised.
+            if let Some(text) = resp["result"]["content"][0]["text"].as_str() {
+                // Wordings only the argument validator produces. A handler's own
+                // "invalid `start`: x" is a semantic verdict and expected here.
+                for rejection in [
+                    "unknown argument",
+                    "missing required argument",
+                    "Valid values:",
+                    "A value the handler cannot read",
+                ] {
+                    assert!(
+                        !text.contains(rejection),
+                        "{name} rejects its own advertised arguments {args}: {text}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A value satisfying one advertised property, so the payload above is built
+    /// from the schema rather than from an assumption about it.
+    fn schema_valid_value(spec: &Value) -> Value {
+        if let Some(first) = spec["enum"].as_array().and_then(|values| values.first()) {
+            return first.clone();
+        }
+        match spec["type"].as_str() {
+            Some("integer") | Some("number") => json!(1),
+            Some("boolean") => json!(true),
+            Some("array") => json!([]),
+            Some("object") => json!({}),
+            _ => json!("x"),
         }
     }
 
@@ -264,7 +323,7 @@ mod tests {
         }
     }
 
-    /// The validator reads integer arguments with `as_u64`, so it rejects
+    /// The validator reads integer arguments as `u64`, so it rejects both
     /// negatives. A client validating against `tools/list` must reach the same
     /// verdict — the schema has to carry the bound, not just the code.
     #[test]
@@ -280,6 +339,12 @@ mod tests {
                         spec["minimum"],
                         json!(0),
                         "{}.{key} is an integer argument without minimum: 0",
+                        t["name"]
+                    );
+                    assert_eq!(
+                        spec["maximum"],
+                        json!(u64::MAX),
+                        "{}.{key} is an integer argument without its upper bound",
                         t["name"]
                     );
                 }

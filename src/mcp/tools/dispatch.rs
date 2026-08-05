@@ -1,15 +1,7 @@
 use serde_json::{Value, json};
 
-use super::args::{
-    CheckHealthArgs, DescribeServiceArgs, GetTraceArgs, ListServicesArgs, MarkCheckpointArgs,
-    QueryLogsArgs, QueryMetricsArgs, QueryTracesArgs, ResetArgs, SummarizeActivityArgs, ToolArgs,
-    parse,
-};
-use super::handlers::{
-    handle_check_health, handle_describe_service, handle_get_trace, handle_list_services,
-    handle_mark_checkpoint, handle_query_logs, handle_query_metrics, handle_query_traces,
-    handle_reset, handle_summarize_activity,
-};
+use super::args::{ToolArgs, parse};
+use super::registry;
 use crate::mcp::protocol;
 use crate::store::SharedState;
 
@@ -39,7 +31,7 @@ pub(super) fn tool_err(id: Option<Value>, message: String) -> Value {
 /// Deserialize `args` into the handler's argument type, or answer with the
 /// problem. Every handler goes through here, so no handler ever sees an argument
 /// its type does not declare.
-fn with_args<T, F>(id: Option<Value>, args: &Value, handle: F) -> Value
+pub(super) fn with_args<T, F>(id: Option<Value>, args: &Value, handle: F) -> Value
 where
     T: ToolArgs,
     F: FnOnce(Option<Value>, &T) -> Value,
@@ -56,10 +48,12 @@ pub fn call(state: &SharedState, id: Option<Value>, params: &Value) -> Value {
         Some(n) => n,
         None => return protocol::error(id, protocol::INVALID_PARAMS, "missing tool name"),
     };
-    // `arguments` is an object per the request schema. Absent and `null` both
-    // mean "no arguments" (clients send either); any other shape is malformed
-    // request structure, which is a protocol error, not a tool input the model
-    // can correct.
+    // `arguments` is an optional object per the request schema, so a literal
+    // `null` is strictly malformed. It is accepted as "no arguments" anyway — a
+    // deliberate deviation, because it is unambiguous and a client that emits
+    // `null` for an absent optional field could otherwise never call a
+    // no-argument tool. Any other non-object shape is malformed request
+    // structure: a protocol error, not a tool input the model can correct.
     let args = match params.get("arguments") {
         None | Some(Value::Null) => json!({}),
         Some(v) if v.is_object() => v.clone(),
@@ -71,40 +65,14 @@ pub fn call(state: &SharedState, id: Option<Value>, params: &Value) -> Value {
             );
         }
     };
-    // Each arm names the argument type that tool advertises; `with_args` is what
-    // makes the advertised schema and the handler's view of the call the same
-    // thing. Tools that take no arguments still parse, so an argument sent to one
-    // is refused rather than ignored.
-    match name {
-        "reset" => with_args(id, &args, |id, a: &ResetArgs| handle_reset(state, id, a)),
-        "mark_checkpoint" => with_args(id, &args, |id, _: &MarkCheckpointArgs| {
-            handle_mark_checkpoint(state, id)
-        }),
-        "summarize_activity" => with_args(id, &args, |id, a: &SummarizeActivityArgs| {
-            handle_summarize_activity(state, id, a)
-        }),
-        "check_health" => with_args(id, &args, |id, _: &CheckHealthArgs| {
-            handle_check_health(state, id)
-        }),
-        "query_logs" => with_args(id, &args, |id, a: &QueryLogsArgs| {
-            handle_query_logs(state, id, a)
-        }),
-        "query_traces" => with_args(id, &args, |id, a: &QueryTracesArgs| {
-            handle_query_traces(state, id, a)
-        }),
-        "query_metrics" => with_args(id, &args, |id, a: &QueryMetricsArgs| {
-            handle_query_metrics(state, id, a)
-        }),
-        "get_trace" => with_args(id, &args, |id, a: &GetTraceArgs| {
-            handle_get_trace(state, id, a)
-        }),
-        "list_services" => with_args(id, &args, |id, _: &ListServicesArgs| {
-            handle_list_services(state, id)
-        }),
-        "describe_service" => with_args(id, &args, |id, a: &DescribeServiceArgs| {
-            handle_describe_service(state, id, a)
-        }),
-        _ => protocol::error(id, protocol::INVALID_PARAMS, "unknown tool"),
+    // The table pairs each name with the argument type it advertises and the
+    // handler it runs, so there is no name-to-type choice left to make here.
+    // `id` is cloned because the table consumes it on the hit path; a request id
+    // is a number or a short string, and this happens once per call.
+    match registry::dispatch(state, id.clone(), name, &args) {
+        Some(response) => response,
+        // A name with no table entry: request structure the model cannot fix.
+        None => protocol::error(id, protocol::INVALID_PARAMS, "unknown tool"),
     }
 }
 
@@ -144,8 +112,9 @@ mod tests {
         );
     }
 
-    /// Same trap as an undeclared key: handlers read `as_str()`/`as_u64()`, so a
-    /// wrong-typed value reads as absent and its filter is never applied.
+    /// Same trap as an undeclared key. Handlers used to read values out of a
+    /// `&Value`, so a wrong-typed one read as absent and its filter was never
+    /// applied; now it cannot deserialize, and the caller is told which key.
     #[test]
     fn call_wrong_typed_argument_is_tool_error() {
         let st = tests_state();
@@ -169,8 +138,8 @@ mod tests {
         );
     }
 
-    /// A checkpoint token is a non-negative counter; `-5` failed `as_u64()` and
-    /// silently widened the summary to all time.
+    /// A checkpoint token is a non-negative counter. `-5` used to fail the read
+    /// and silently widen the summary to all time.
     #[test]
     fn call_negative_integer_argument_is_tool_error() {
         let st = tests_state();
@@ -184,7 +153,7 @@ mod tests {
         assert!(text.contains("since"), "message must name the key: {text}");
     }
 
-    /// `50.0` satisfies JSON Schema `integer` but not `as_u64`, so accepting it
+    /// `50.0` satisfies JSON Schema `integer` but is not a `u64`, so accepting it
     /// would put us right back to dropping the value in silence. Rejected on
     /// purpose — with a message that says how to write it instead.
     #[test]
@@ -204,8 +173,9 @@ mod tests {
         );
     }
 
-    /// `detail` is compared against "detailed", so any other string silently
-    /// degraded to concise output instead of being questioned.
+    /// `detail` used to be compared against the string "detailed", so any other
+    /// value silently degraded to concise output instead of being questioned. It
+    /// is an enum now, and the validator answers before a handler sees it.
     #[test]
     fn call_out_of_enum_argument_is_tool_error() {
         let st = tests_state();
@@ -244,8 +214,9 @@ mod tests {
         }
     }
 
-    /// Lenient by choice: clients that send `null` for "no arguments" are common
-    /// and unambiguous, so it is treated as `{}` rather than rejected.
+    /// Lenient by choice, and a deviation from the request schema: `null` is not
+    /// an object, but it is an unambiguous "no arguments", so it is treated as
+    /// `{}` rather than refused.
     #[test]
     fn call_null_arguments_is_treated_as_empty() {
         let st = tests_state();
