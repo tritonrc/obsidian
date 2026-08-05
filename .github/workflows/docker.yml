@@ -2,20 +2,28 @@ name: Docker
 
 # Publishes ghcr.io/tritonrc/aniani:
 #   v0.13.3 tag  -> :0.13.3, :0.13, :latest
-#   master push  -> :edge
+#   master       -> :edge, but only after CI passes for that commit
 #
 # Each architecture is compiled on a native runner (no QEMU) and the
 # COPY-only Dockerfile assembles both into one multi-arch manifest.
 # Pull requests build and smoke-test both architectures but publish nothing.
 on:
+  # :edge is published from a completed CI run rather than directly from the
+  # push, so a commit whose tests fail can never produce an image. Release tags
+  # keep the direct trigger: CI does not run on tags, and a tag is cut from a
+  # master commit that has already been through CI.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
   push:
-    branches: [master]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: docker-${{ github.ref }}
+  # Under workflow_run, github.ref is the default branch rather than the commit
+  # that was tested, so key on the tested sha where there is one.
+  group: docker-${{ github.event.workflow_run.head_sha || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,6 +32,15 @@ env:
 jobs:
   binary:
     name: Static binary (${{ matrix.arch }})
+    # CI also runs on pull requests, and those completions raise workflow_run
+    # events too — ignore everything but a successful CI push build on master.
+    # Pull requests reach this workflow through their own `pull_request` trigger.
+    if: >-
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'master'
+      )
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -39,7 +56,11 @@ jobs:
             target: aarch64-unknown-linux-musl
 
     steps:
+      # A workflow_run checkout defaults to the default-branch tip, which is not
+      # necessarily the commit CI tested — pin it to the tested sha.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -108,8 +129,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # The single gate on publishing: a CI-verified master commit (:edge) or a
+      # release tag. Pull requests and manual dispatches build and smoke-test
+      # only, so neither can put an unverified image in the registry.
+      PUBLISH: ${{ github.event_name == 'workflow_run' || startsWith(github.ref, 'refs/tags/v') }}
     steps:
+      # A workflow_run checkout defaults to the default-branch tip, which is not
+      # necessarily the commit CI tested — pin it to the tested sha.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Download binaries
         uses: actions/download-artifact@v4
@@ -129,10 +159,10 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Skipped on pull requests, which push nothing (and whose token would be
-      # read-only if the PR came from a fork).
+      # Only when something will actually be pushed — a fork PR's token would be
+      # read-only anyway.
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -147,14 +177,19 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=edge,branch=master
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # Never pushed — only gives the PR build a name to build under.
+            # Set explicitly rather than via type=edge: under workflow_run,
+            # github.ref is the default branch, not the tested commit's ref.
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            # Never pushed — only gives PR and dispatch builds a name.
             type=ref,event=pr
           labels: |
             org.opencontainers.image.title=aniani
             org.opencontainers.image.description=Agent-first, lightweight observability engine — OTLP in, LogQL/PromQL/TraceQL out
             org.opencontainers.image.licenses=MIT
+            # metadata-action would otherwise take these from github.sha, which
+            # under workflow_run is the default-branch tip.
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha || github.sha }}
 
       # Smoke test the amd64 image BEFORE publishing anything: a pushed image is
       # public immediately, so a broken one should never reach the registry.
@@ -189,7 +224,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ env.PUBLISH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
@@ -198,14 +233,15 @@ jobs:
 
       - name: Summary
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            heading="### Built (not pushed)"
-          else
+          if [ "${{ env.PUBLISH }}" = "true" ]; then
             heading="### Pushed"
+          else
+            heading="### Built (not pushed)"
           fi
           {
             echo "$heading"
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
+            echo "commit \`${{ github.event.workflow_run.head_sha || github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
