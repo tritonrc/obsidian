@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 
 use super::common::escape_quoted;
+use crate::mcp::tools::args::QueryLogsArgs;
 use crate::mcp::tools::dispatch::{tool_err, tool_ok};
 use crate::query::logql::eval::{LogQLResult, evaluate_logql_limited};
 use crate::query::logql::parser::parse_logql;
@@ -9,22 +10,18 @@ use crate::store::SharedState;
 pub(in crate::mcp::tools) fn handle_query_logs(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &QueryLogsArgs,
 ) -> Value {
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(50)
-        .min(100) as usize;
+    let limit = args.limit.unwrap_or(50).min(100) as usize;
     // Raw LogQL escape hatch wins over structured filters.
-    let query = if let Some(raw) = args.get("logql").and_then(|v| v.as_str()) {
-        raw.to_string()
+    let query = if let Some(raw) = &args.logql {
+        raw.clone()
     } else {
         let mut sel = Vec::new();
-        if let Some(s) = args.get("service").and_then(|v| v.as_str()) {
+        if let Some(s) = &args.service {
             sel.push(format!("service=\"{}\"", escape_quoted(s)));
         }
-        if let Some(l) = args.get("level").and_then(|v| v.as_str()) {
+        if let Some(l) = &args.level {
             sel.push(format!("level=\"{}\"", escape_quoted(l)));
         }
         if sel.is_empty() {
@@ -34,7 +31,7 @@ pub(in crate::mcp::tools) fn handle_query_logs(
             );
         }
         let mut q = format!("{{{}}}", sel.join(", "));
-        if let Some(c) = args.get("contains").and_then(|v| v.as_str()) {
+        if let Some(c) = &args.contains {
             q.push_str(&format!(" |= \"{}\"", escape_quoted(c)));
         }
         q

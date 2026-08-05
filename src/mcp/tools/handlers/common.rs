@@ -19,18 +19,20 @@ pub(super) fn known_services(state: &SharedState) -> Vec<String> {
 /// Require a non-empty `service` that actually reports telemetry. On failure
 /// returns a model-visible `isError` result that echoes the bad value and lists
 /// valid services (per the §5 self-correction contract).
+///
+/// Presence and type are already settled by the tool's argument type; only what
+/// the store knows is checked here.
 pub(super) fn require_known_service(
     state: &SharedState,
     id: &Option<Value>,
-    args: &Value,
-) -> Result<String, Value> {
-    let service = match args.get("service").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => return Err(tool_err(id.clone(), "`service` is required".into())),
-    };
+    service: &str,
+) -> Result<(), Value> {
+    if service.is_empty() {
+        return Err(tool_err(id.clone(), "`service` must not be empty".into()));
+    }
     let known = known_services(state);
-    if known.iter().any(|s| s == &service) {
-        Ok(service)
+    if known.iter().any(|s| s == service) {
+        Ok(())
     } else {
         let valid = if known.is_empty() {
             "none yet".to_string()

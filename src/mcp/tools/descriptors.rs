@@ -1,5 +1,9 @@
 use serde_json::{Value, json};
 
+use super::args::{
+    CheckHealthArgs, DescribeServiceArgs, GetTraceArgs, ListServicesArgs, MarkCheckpointArgs,
+    QueryLogsArgs, QueryMetricsArgs, QueryTracesArgs, ResetArgs, SummarizeActivityArgs, ToolArgs,
+};
 use crate::mcp::protocol;
 
 /// Server-level instructions injected at `initialize` (the agent loop).
@@ -25,15 +29,7 @@ fn descriptors() -> Vec<Value> {
             "name": "reset",
             "title": "Reset Telemetry Store",
             "description": "Clear telemetry. scope='all' wipes everything; scope='service' clears one service (requires `service`). The only write tool. Returns a fresh checkpoint token.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "scope": { "type": "string", "enum": ["all", "service"] },
-                    "service": { "type": "string" }
-                },
-                "additionalProperties": false,
-                "required": ["scope"]
-            },
+            "inputSchema": ResetArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -49,7 +45,7 @@ fn descriptors() -> Vec<Value> {
             "name": "mark_checkpoint",
             "title": "Mark Checkpoint",
             "description": "Return an opaque monotonic checkpoint token for 'now'. Pass it later as `since` to scope a summary to telemetry ingested after this point. Not a wall-clock time.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "inputSchema": MarkCheckpointArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": { "checkpoint": { "type": "integer" } },
@@ -61,16 +57,7 @@ fn descriptors() -> Vec<Value> {
             "name": "summarize_activity",
             "title": "Summarize Service Activity",
             "description": "Triage one service: error logs, failing/slow traces, error metrics, health score, one-line summary. Use after a run to see what it produced. Pass `since` (a checkpoint token) to scope to the latest run. Use this BEFORE drilling in with query_* tools.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "service": { "type": "string" },
-                    "since": { "type": "integer", "minimum": 0 },
-                    "detail": { "type": "string", "enum": ["concise", "detailed"] }
-                },
-                "additionalProperties": false,
-                "required": ["service"]
-            },
+            "inputSchema": SummarizeActivityArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -92,7 +79,7 @@ fn descriptors() -> Vec<Value> {
             "name": "check_health",
             "title": "Check Global Health",
             "description": "Rank every known service by health, worst first. Use when you don't yet know which service is in trouble.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "inputSchema": CheckHealthArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": { "services": { "type": "array", "items": { "type": "object" } } },
@@ -104,15 +91,7 @@ fn descriptors() -> Vec<Value> {
             "name": "query_logs",
             "title": "Query Logs",
             "description": "Fetch log lines. Provide structured filters (service, level, contains) OR a raw `logql` string (e.g. {service=\"api\"} |= \"error\"). If `logql` is set, structured filters are ignored. To scope to a run, reset first, then query; summarize_activity is the checkpoint-accurate run summary.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "service": { "type": "string" }, "level": { "type": "string" },
-                    "contains": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 0 }, "logql": { "type": "string" }
-                },
-                "additionalProperties": false
-            },
+            "inputSchema": QueryLogsArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -129,16 +108,7 @@ fn descriptors() -> Vec<Value> {
             "name": "query_traces",
             "title": "Query Traces",
             "description": "Find traces. Provide structured filters (service, name, status, min_duration) OR a raw `traceql` string. If `traceql` is set, structured filters are ignored.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "service": { "type": "string" }, "name": { "type": "string" },
-                    "status": { "type": "string", "enum": ["error", "ok", "unset"] }, "min_duration": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 0 },
-                    "traceql": { "type": "string" }
-                },
-                "additionalProperties": false
-            },
+            "inputSchema": QueryTracesArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -155,15 +125,7 @@ fn descriptors() -> Vec<Value> {
             "name": "query_metrics",
             "title": "Query Metrics",
             "description": "Run a raw PromQL query (e.g. rate(http_requests_total[5m])). For a range query pass all of start/end (unix seconds, or ms/ns) and step (a duration like 15s or 1m); omit all three for an instant query at now.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "promql": { "type": "string" },
-                    "start": { "type": "string" }, "end": { "type": "string" }, "step": { "type": "string" }
-                },
-                "additionalProperties": false,
-                "required": ["promql"]
-            },
+            "inputSchema": QueryMetricsArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -177,15 +139,7 @@ fn descriptors() -> Vec<Value> {
             "name": "get_trace",
             "title": "Get Trace Tree",
             "description": "Return one trace as a parent/child span tree. `trace_id` is 32 hex chars. Use `detail=detailed` to include span attributes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "trace_id": { "type": "string" },
-                    "detail": { "type": "string", "enum": ["concise", "detailed"] }
-                },
-                "additionalProperties": false,
-                "required": ["trace_id"]
-            },
+            "inputSchema": GetTraceArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -200,7 +154,7 @@ fn descriptors() -> Vec<Value> {
             "name": "list_services",
             "title": "List Services",
             "description": "List every service reporting telemetry and which signals (logs/metrics/traces) each has.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "inputSchema": ListServicesArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": { "services": { "type": "array", "items": { "type": "object" } } },
@@ -212,12 +166,7 @@ fn descriptors() -> Vec<Value> {
             "name": "describe_service",
             "title": "Describe Service",
             "description": "Catalog a service's queryable surface: metric names, log label keys + values, span attribute keys. Call this before writing a raw logql/promql/traceql query.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "service": { "type": "string" } },
-                "additionalProperties": false,
-                "required": ["service"]
-            },
+            "inputSchema": DescribeServiceArgs::schema(),
             "outputSchema": {
                 "type": "object",
                 "properties": {
@@ -237,114 +186,39 @@ pub fn list(id: Option<Value>) -> Value {
     protocol::success(id, json!({ "tools": descriptors() }))
 }
 
-/// Does `value` satisfy a JSON Schema `type` keyword? Unknown type names and
-/// type unions (which no `inputSchema` uses) are not constrained.
-///
-/// `integer` means what `as_u64` can read: a non-negative integer literal.
-/// Every integer argument here is a count or a checkpoint token, declared
-/// `minimum: 0` so a client validating against `tools/list` agrees, and the
-/// fractional form `50.0` — formally a JSON Schema integer — is refused rather
-/// than accepted and then dropped by `as_u64`. Narrower than the keyword, but a
-/// validator that admits values the handlers cannot read reopens the silent-drop
-/// bug this whole guard exists to prevent.
-fn type_matches(expected: &str, value: &Value) -> bool {
-    match expected {
-        "string" => value.is_string(),
-        "integer" => value.is_u64(),
-        "number" => value.is_number(),
-        "boolean" => value.is_boolean(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        _ => true,
-    }
-}
-
-/// How a declared type is described to the caller, so the message says what to
-/// write rather than only what was wrong.
-fn type_expectation(expected: &str) -> &str {
-    match expected {
-        "integer" => "a non-negative integer",
-        "string" => "a string",
-        "number" => "a number",
-        "boolean" => "a boolean",
-        "object" => "an object",
-        "array" => "an array",
-        other => other,
-    }
-}
-
-/// The JSON Schema type name for a value, for error messages.
-fn type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(n) if n.is_u64() => "integer",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-/// Why the named tool cannot accept these arguments, phrased for the caller, or
-/// `None` if every key is declared and every value fits its declared schema.
-///
-/// Handlers read their arguments with `as_str`/`as_u64` and treat anything else
-/// as absent, so an undeclared key, a wrong-typed value, or an out-of-enum value
-/// would all be dropped in silence — and a dropped filter is invisible in the
-/// result, which still reports a count that reads like a match. Validating here
-/// against the tool's own advertised schema keeps one source of truth.
-///
-/// `args` must be an object; a non-object is a malformed request, rejected by
-/// the caller before this point.
-pub(super) fn argument_problem(name: &str, args: &Value) -> Option<String> {
-    let tools = descriptors();
-    let schema = &tools.iter().find(|t| t["name"] == name)?["inputSchema"];
-    let props = schema.get("properties")?.as_object()?;
-    let given = args.as_object()?;
-
-    for (key, value) in given {
-        let Some(spec) = props.get(key) else {
-            let accepts = if props.is_empty() {
-                format!("{name} takes no arguments")
-            } else {
-                let mut declared: Vec<&str> = props.keys().map(String::as_str).collect();
-                declared.sort_unstable();
-                format!("{name} accepts: {}", declared.join(", "))
-            };
-            return Some(format!(
-                "unknown argument `{key}` — {accepts}. Undeclared keys are not filters: they are \
-                 never applied, so the result would have looked filtered when it was not. For \
-                 span/resource attributes use a raw query string."
-            ));
-        };
-        if let Some(expected) = spec.get("type").and_then(|t| t.as_str())
-            && !type_matches(expected, value)
-        {
-            return Some(format!(
-                "argument `{key}` must be {}, got {} ({value}). A value the handler cannot read \
-                 is read as absent, so its filter would never have been applied.",
-                type_expectation(expected),
-                type_name(value)
-            ));
-        }
-        if let Some(allowed) = spec.get("enum").and_then(|e| e.as_array())
-            && !allowed.contains(value)
-        {
-            let valid: Vec<String> = allowed.iter().map(|v| v.to_string()).collect();
-            return Some(format!(
-                "invalid `{key}`: {value}. Valid values: {}",
-                valid.join(", ")
-            ));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Every advertised schema must be the one its argument type generates. A
+    /// descriptor that spelled its own schema out again — which is how this file
+    /// used to read — could describe a property no handler has a field for.
+    #[test]
+    fn every_advertised_schema_is_the_one_its_argument_type_generates() {
+        let resp = list(Some(json!(1)));
+        let generated: Vec<(&str, Value)> = vec![
+            ("reset", ResetArgs::schema()),
+            ("mark_checkpoint", MarkCheckpointArgs::schema()),
+            ("summarize_activity", SummarizeActivityArgs::schema()),
+            ("check_health", CheckHealthArgs::schema()),
+            ("query_logs", QueryLogsArgs::schema()),
+            ("query_traces", QueryTracesArgs::schema()),
+            ("query_metrics", QueryMetricsArgs::schema()),
+            ("get_trace", GetTraceArgs::schema()),
+            ("list_services", ListServicesArgs::schema()),
+            ("describe_service", DescribeServiceArgs::schema()),
+        ];
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(generated.len(), tools.len(), "a tool has no argument type");
+        for (name, schema) in generated {
+            let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+            assert_eq!(
+                tool["inputSchema"], schema,
+                "{name} advertises its own schema"
+            );
+        }
+    }
 
     #[test]
     fn tools_list_contains_all_ten_with_annotations() {

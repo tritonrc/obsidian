@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 
+use crate::mcp::tools::args::QueryMetricsArgs;
 use crate::mcp::tools::dispatch::{tool_err, tool_ok};
 use crate::query::promql::eval::{PromQLResult, evaluate_instant, evaluate_range};
 use crate::store::SharedState;
@@ -7,15 +8,15 @@ use crate::store::SharedState;
 pub(in crate::mcp::tools) fn handle_query_metrics(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &QueryMetricsArgs,
 ) -> Value {
-    let promql = match args.get("promql").and_then(|v| v.as_str()) {
-        Some(q) if !q.is_empty() => q,
-        _ => return tool_err(id, "`promql` is required".into()),
-    };
-    let start = args.get("start").and_then(|v| v.as_str());
-    let end = args.get("end").and_then(|v| v.as_str());
-    let step = args.get("step").and_then(|v| v.as_str());
+    let promql = args.promql.as_str();
+    if promql.is_empty() {
+        return tool_err(id, "`promql` must not be empty".into());
+    }
+    let start = args.start.as_deref();
+    let end = args.end.as_deref();
+    let step = args.step.as_deref();
     let store = state.metric_store.read();
     let eval_result = if start.is_some() || end.is_some() || step.is_some() {
         // Range query: all three are required together.

@@ -2,33 +2,37 @@ use serde_json::{Value, json};
 
 use super::common::require_known_service;
 use crate::mcp::synth;
+use crate::mcp::tools::args::{
+    DescribeServiceArgs, Detail, ResetArgs, ResetScope, SummarizeActivityArgs,
+};
 use crate::mcp::tools::dispatch::{tool_err, tool_ok};
 use crate::store::SharedState;
 
 pub(in crate::mcp::tools) fn handle_reset(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &ResetArgs,
 ) -> Value {
     // Each arm clears its scope and returns the scope-specific structured fields.
-    let mut structured = match args.get("scope").and_then(|v| v.as_str()) {
-        Some("all") => {
+    let mut structured = match args.scope {
+        ResetScope::All => {
             state.log_store.write().clear();
             state.metric_store.write().clear();
             state.trace_store.write().clear();
-            json!({ "scope": "all" })
+            json!({ "scope": args.scope.as_str() })
         }
-        Some("service") => {
-            let service = match args.get("service").and_then(|v| v.as_str()) {
-                Some(s) if !s.is_empty() => s.to_string(),
+        ResetScope::Service => {
+            // `service` is only required by this scope, so the schema cannot
+            // demand it — the check belongs here.
+            let service = match args.service.as_deref() {
+                Some(s) if !s.is_empty() => s,
                 _ => return tool_err(id, "scope='service' requires a non-empty `service`".into()),
             };
-            state.log_store.write().clear_service(&service);
-            state.metric_store.write().clear_service(&service);
-            state.trace_store.write().clear_service(&service);
-            json!({ "scope": "service", "service": service })
+            state.log_store.write().clear_service(service);
+            state.metric_store.write().clear_service(service);
+            state.trace_store.write().clear_service(service);
+            json!({ "scope": args.scope.as_str(), "service": service })
         }
-        _ => return tool_err(id, "scope must be 'all' or 'service'".into()),
     };
     let checkpoint = state.ingest_seq.load(std::sync::atomic::Ordering::Relaxed);
     structured["checkpoint"] = json!(checkpoint);
@@ -54,15 +58,13 @@ pub(in crate::mcp::tools) fn handle_mark_checkpoint(
 pub(in crate::mcp::tools) fn handle_summarize_activity(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &SummarizeActivityArgs,
 ) -> Value {
-    let service = match require_known_service(state, &id, args) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let since = args.get("since").and_then(|v| v.as_u64());
-    let detail = args.get("detail").and_then(|v| v.as_str()) == Some("detailed");
-    let activity = synth::summarize_activity(state, &service, since, detail);
+    if let Err(e) = require_known_service(state, &id, &args.service) {
+        return e;
+    }
+    let detail = matches!(args.detail, Some(Detail::Detailed));
+    let activity = synth::summarize_activity(state, &args.service, args.since, detail);
     let text = activity.summary.clone();
     match serde_json::to_value(&activity) {
         Ok(v) => tool_ok(id, v, text),
@@ -91,13 +93,12 @@ pub(in crate::mcp::tools) fn handle_check_health(state: &SharedState, id: Option
 pub(in crate::mcp::tools) fn handle_describe_service(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &DescribeServiceArgs,
 ) -> Value {
-    let service = match require_known_service(state, &id, args) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let cat = synth::describe_service(state, &service);
+    if let Err(e) = require_known_service(state, &id, &args.service) {
+        return e;
+    }
+    let cat = synth::describe_service(state, &args.service);
     let text = format!(
         "{} metric(s), {} log label key(s), {} span attr key(s)",
         cat.metrics.len(),

@@ -80,6 +80,9 @@ src/
 │   ├── server.rs        # POST /mcp dispatch + transport compliance (202/batch/origin/version)
 │   ├── tools/           # tool descriptors, tools/list, tools/call dispatch, the 10 handlers, instructions
 │   │   ├── mod.rs       # public tools surface: INSTRUCTIONS, list, call
+│   │   ├── args/        # one typed struct per tool — the source of both inputSchema and deserialization
+│   │   │   ├── mod.rs   # the 10 tool_args! declarations; add a tool's arguments here
+│   │   │   └── schema.rs # tool_args!/str_enum! macros, schema generation, argument validation
 │   │   ├── descriptors.rs
 │   │   ├── dispatch.rs
 │   │   └── handlers/
@@ -101,6 +104,23 @@ src/
     ├── status.rs        # GET /api/v1/status
     └── summary.rs       # GET /api/v1/summary — unified error summary across signals
 ```
+
+### MCP Tool Arguments
+
+Never read a tool argument out of a `&Value` in a handler. Declare it in `src/mcp/tools/args/mod.rs` and let the handler take the typed struct:
+
+```rust
+tool_args! {
+    struct QueryTracesArgs for "query_traces" {
+        service: Option<String>,   // Option<T> → optional
+        status: Option<TraceStatus>, // str_enum! type → advertises its own values
+        limit: Option<u64>,        // u64 → advertises minimum: 0
+        traceql: Option<String>,
+    }
+}
+```
+
+That one declaration generates the `inputSchema` in `descriptors.rs` and the validator that rejects a bad call, so the advertised contract and the handler cannot disagree. Two consequences to expect: a field no handler reads is a `field is never read` build failure (that is intentional — an argument accepted and ignored is invisible to the caller), and a closed value set belongs in a `str_enum!` rather than a string comparison in the handler. Keep semantic validation — duration parsing, hex length, "does this service exist" — in the handler.
 
 ### Naming
 

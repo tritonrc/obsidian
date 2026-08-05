@@ -1,6 +1,10 @@
 use serde_json::{Value, json};
 
-use super::descriptors;
+use super::args::{
+    CheckHealthArgs, DescribeServiceArgs, GetTraceArgs, ListServicesArgs, MarkCheckpointArgs,
+    QueryLogsArgs, QueryMetricsArgs, QueryTracesArgs, ResetArgs, SummarizeActivityArgs, ToolArgs,
+    parse,
+};
 use super::handlers::{
     handle_check_health, handle_describe_service, handle_get_trace, handle_list_services,
     handle_mark_checkpoint, handle_query_logs, handle_query_metrics, handle_query_traces,
@@ -32,6 +36,20 @@ pub(super) fn tool_err(id: Option<Value>, message: String) -> Value {
     )
 }
 
+/// Deserialize `args` into the handler's argument type, or answer with the
+/// problem. Every handler goes through here, so no handler ever sees an argument
+/// its type does not declare.
+fn with_args<T, F>(id: Option<Value>, args: &Value, handle: F) -> Value
+where
+    T: ToolArgs,
+    F: FnOnce(Option<Value>, &T) -> Value,
+{
+    match parse::<T>(args) {
+        Ok(parsed) => handle(id, &parsed),
+        Err(problem) => tool_err(id, problem),
+    }
+}
+
 /// Dispatch a `tools/call` request to the named tool handler.
 pub fn call(state: &SharedState, id: Option<Value>, params: &Value) -> Value {
     let name = match params.get("name").and_then(|v| v.as_str()) {
@@ -53,20 +71,39 @@ pub fn call(state: &SharedState, id: Option<Value>, params: &Value) -> Value {
             );
         }
     };
-    if let Some(problem) = descriptors::argument_problem(name, &args) {
-        return tool_err(id, problem);
-    }
+    // Each arm names the argument type that tool advertises; `with_args` is what
+    // makes the advertised schema and the handler's view of the call the same
+    // thing. Tools that take no arguments still parse, so an argument sent to one
+    // is refused rather than ignored.
     match name {
-        "reset" => handle_reset(state, id, &args),
-        "mark_checkpoint" => handle_mark_checkpoint(state, id),
-        "summarize_activity" => handle_summarize_activity(state, id, &args),
-        "check_health" => handle_check_health(state, id),
-        "query_logs" => handle_query_logs(state, id, &args),
-        "query_traces" => handle_query_traces(state, id, &args),
-        "query_metrics" => handle_query_metrics(state, id, &args),
-        "get_trace" => handle_get_trace(state, id, &args),
-        "list_services" => handle_list_services(state, id),
-        "describe_service" => handle_describe_service(state, id, &args),
+        "reset" => with_args(id, &args, |id, a: &ResetArgs| handle_reset(state, id, a)),
+        "mark_checkpoint" => with_args(id, &args, |id, _: &MarkCheckpointArgs| {
+            handle_mark_checkpoint(state, id)
+        }),
+        "summarize_activity" => with_args(id, &args, |id, a: &SummarizeActivityArgs| {
+            handle_summarize_activity(state, id, a)
+        }),
+        "check_health" => with_args(id, &args, |id, _: &CheckHealthArgs| {
+            handle_check_health(state, id)
+        }),
+        "query_logs" => with_args(id, &args, |id, a: &QueryLogsArgs| {
+            handle_query_logs(state, id, a)
+        }),
+        "query_traces" => with_args(id, &args, |id, a: &QueryTracesArgs| {
+            handle_query_traces(state, id, a)
+        }),
+        "query_metrics" => with_args(id, &args, |id, a: &QueryMetricsArgs| {
+            handle_query_metrics(state, id, a)
+        }),
+        "get_trace" => with_args(id, &args, |id, a: &GetTraceArgs| {
+            handle_get_trace(state, id, a)
+        }),
+        "list_services" => with_args(id, &args, |id, _: &ListServicesArgs| {
+            handle_list_services(state, id)
+        }),
+        "describe_service" => with_args(id, &args, |id, a: &DescribeServiceArgs| {
+            handle_describe_service(state, id, a)
+        }),
         _ => protocol::error(id, protocol::INVALID_PARAMS, "unknown tool"),
     }
 }

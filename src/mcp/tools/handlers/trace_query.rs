@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 
 use super::common::escape_quoted;
 use crate::mcp::synth;
+use crate::mcp::tools::args::QueryTracesArgs;
 use crate::mcp::tools::dispatch::{tool_err, tool_ok};
 use crate::query::traceql::eval::evaluate_traceql;
 use crate::query::traceql::parser::parse_traceql;
@@ -10,32 +11,22 @@ use crate::store::SharedState;
 pub(in crate::mcp::tools) fn handle_query_traces(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &QueryTracesArgs,
 ) -> Value {
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(50)
-        .min(100) as usize;
-    let query = if let Some(raw) = args.get("traceql").and_then(|v| v.as_str()) {
-        raw.to_string()
+    let limit = args.limit.unwrap_or(50).min(100) as usize;
+    let query = if let Some(raw) = &args.traceql {
+        raw.clone()
     } else {
         let mut conds = Vec::new();
-        if let Some(s) = args.get("service").and_then(|v| v.as_str()) {
+        if let Some(s) = &args.service {
             conds.push(format!("resource.service.name = \"{}\"", escape_quoted(s)));
         }
-        if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
-            match status {
-                "error" | "ok" | "unset" => conds.push(format!("status = {status}")),
-                _ => {
-                    return tool_err(
-                        id,
-                        format!("invalid `status`: \"{status}\". Valid values: error, ok, unset"),
-                    );
-                }
-            }
+        // The argument type is the enum, so there is no out-of-range case left
+        // for this handler to catch.
+        if let Some(status) = args.status {
+            conds.push(format!("status = {status}"));
         }
-        if let Some(d) = args.get("min_duration").and_then(|v| v.as_str()) {
+        if let Some(d) = &args.min_duration {
             if crate::config::parse_duration(d).is_none() {
                 return tool_err(
                     id,
@@ -44,7 +35,7 @@ pub(in crate::mcp::tools) fn handle_query_traces(
             }
             conds.push(format!("duration > {d}"));
         }
-        if let Some(n) = args.get("name").and_then(|v| v.as_str()) {
+        if let Some(n) = &args.name {
             conds.push(format!("name = \"{}\"", escape_quoted(n)));
         }
         if conds.is_empty() {

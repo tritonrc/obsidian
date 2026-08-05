@@ -1,5 +1,6 @@
 //! MCP tool registry, `tools/list`, and `tools/call` dispatch.
 
+mod args;
 mod descriptors;
 mod dispatch;
 mod handlers;
