@@ -230,6 +230,31 @@ pub fn list(id: Option<Value>) -> Value {
     protocol::success(id, json!({ "tools": descriptors() }))
 }
 
+/// The argument keys a tool declares in its `inputSchema.properties`, sorted.
+/// `None` if no tool by that name exists.
+fn declared_args(name: &str) -> Option<Vec<String>> {
+    let tools = descriptors();
+    let tool = tools.iter().find(|t| t["name"] == name)?;
+    let props = tool["inputSchema"]["properties"].as_object()?;
+    let mut keys: Vec<String> = props.keys().cloned().collect();
+    keys.sort();
+    Some(keys)
+}
+
+/// First argument key the named tool does not declare, paired with the keys it
+/// does accept. Handlers read only their declared keys, so anything else would
+/// be dropped silently and the result would look filtered when it wasn't —
+/// callers must be told instead.
+pub(super) fn unknown_argument(name: &str, args: &Value) -> Option<(String, Vec<String>)> {
+    let declared = declared_args(name)?;
+    let unknown = args
+        .as_object()?
+        .keys()
+        .find(|key| !declared.contains(key))?
+        .clone();
+    Some((unknown, declared))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
