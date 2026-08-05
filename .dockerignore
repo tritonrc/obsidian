@@ -1,0 +1,4 @@
+# The image is assembled from prebuilt binaries under dist/<arch>/ — the source
+# tree, target/ and .git are not part of the build context at all.
+*
+!dist/

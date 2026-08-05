@@ -72,10 +72,47 @@ Expand-Archive aniani.zip -DestinationPath .
 .\aniani.exe --port 4320
 ```
 
+### Docker
+
+Multi-arch images (linux/amd64, linux/arm64) are published to GitHub Container
+Registry on every release:
+
+```bash
+docker run --rm -p 4320:4320 ghcr.io/tritonrc/aniani:latest
+```
+
+Tags: `:latest` and `:0.13.2` / `:0.13` for releases, `:edge` for the current
+`master`. The image is a statically linked binary on `scratch` — no shell, no
+package manager — running as uid 65532. It defaults to `--bind-address 0.0.0.0`
+(the binary's own `127.0.0.1` default is unreachable from outside a container)
+and keeps snapshots in `/data`:
+
+```bash
+# Persist snapshots across container restarts
+docker run --rm -p 4320:4320 -v aniani-data:/data ghcr.io/tritonrc/aniani:latest \
+  --bind-address 0.0.0.0 --snapshot-dir /data/ --snapshot-interval 60
+
+# Send telemetry from another container on the same network
+docker network create o11y
+docker run --rm -d --name aniani --network o11y ghcr.io/tritonrc/aniani:latest
+#   ... then point OTEL_EXPORTER_OTLP_ENDPOINT at http://aniani:4320
+```
+
+Aniani has no authentication or TLS, so treat the published port as trusted-network
+only — bind it to a loopback interface (`-p 127.0.0.1:4320:4320`) if the Docker
+host is not private.
+
 Or build from source on any platform:
 
 ```bash
 cargo build --release
+```
+
+To build the container image locally (compiles a musl binary in a `rust:alpine`
+container, then assembles the image for your architecture):
+
+```bash
+scripts/docker-image.sh aniani:dev
 ```
 
 ---
