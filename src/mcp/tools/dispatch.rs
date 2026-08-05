@@ -147,6 +147,26 @@ mod tests {
         assert!(text.contains("since"), "message must name the key: {text}");
     }
 
+    /// `50.0` satisfies JSON Schema `integer` but not `as_u64`, so accepting it
+    /// would put us right back to dropping the value in silence. Rejected on
+    /// purpose — with a message that says how to write it instead.
+    #[test]
+    fn call_fractional_form_of_integer_is_rejected_with_a_correctable_message() {
+        let st = tests_state();
+        let resp = call(
+            &st,
+            Some(json!(1)),
+            &json!({ "name": "query_traces", "arguments": { "service": "api", "limit": 50.0 } }),
+        );
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("limit"), "message must name the key: {text}");
+        assert!(
+            text.contains("non-negative integer"),
+            "message must state the real contract: {text}"
+        );
+    }
+
     /// `detail` is compared against "detailed", so any other string silently
     /// degraded to concise output instead of being questioned.
     #[test]

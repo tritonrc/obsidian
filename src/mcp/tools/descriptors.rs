@@ -65,7 +65,7 @@ fn descriptors() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "service": { "type": "string" },
-                    "since": { "type": "integer" },
+                    "since": { "type": "integer", "minimum": 0 },
                     "detail": { "type": "string", "enum": ["concise", "detailed"] }
                 },
                 "additionalProperties": false,
@@ -109,7 +109,7 @@ fn descriptors() -> Vec<Value> {
                 "properties": {
                     "service": { "type": "string" }, "level": { "type": "string" },
                     "contains": { "type": "string" },
-                    "limit": { "type": "integer" }, "logql": { "type": "string" }
+                    "limit": { "type": "integer", "minimum": 0 }, "logql": { "type": "string" }
                 },
                 "additionalProperties": false
             },
@@ -133,8 +133,8 @@ fn descriptors() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "service": { "type": "string" }, "name": { "type": "string" },
-                    "status": { "type": "string" }, "min_duration": { "type": "string" },
-                    "limit": { "type": "integer" },
+                    "status": { "type": "string", "enum": ["error", "ok", "unset"] }, "min_duration": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 0 },
                     "traceql": { "type": "string" }
                 },
                 "additionalProperties": false
@@ -240,9 +240,13 @@ pub fn list(id: Option<Value>) -> Value {
 /// Does `value` satisfy a JSON Schema `type` keyword? Unknown type names and
 /// type unions (which no `inputSchema` uses) are not constrained.
 ///
-/// `integer` additionally requires non-negative: every integer argument in this
-/// API is a count or a checkpoint token, and handlers read them with `as_u64`,
-/// so `-5` would parse as absent.
+/// `integer` means what `as_u64` can read: a non-negative integer literal.
+/// Every integer argument here is a count or a checkpoint token, declared
+/// `minimum: 0` so a client validating against `tools/list` agrees, and the
+/// fractional form `50.0` — formally a JSON Schema integer — is refused rather
+/// than accepted and then dropped by `as_u64`. Narrower than the keyword, but a
+/// validator that admits values the handlers cannot read reopens the silent-drop
+/// bug this whole guard exists to prevent.
 fn type_matches(expected: &str, value: &Value) -> bool {
     match expected {
         "string" => value.is_string(),
@@ -252,6 +256,20 @@ fn type_matches(expected: &str, value: &Value) -> bool {
         "object" => value.is_object(),
         "array" => value.is_array(),
         _ => true,
+    }
+}
+
+/// How a declared type is described to the caller, so the message says what to
+/// write rather than only what was wrong.
+fn type_expectation(expected: &str) -> &str {
+    match expected {
+        "integer" => "a non-negative integer",
+        "string" => "a string",
+        "number" => "a number",
+        "boolean" => "a boolean",
+        "object" => "an object",
+        "array" => "an array",
+        other => other,
     }
 }
 
@@ -304,8 +322,9 @@ pub(super) fn argument_problem(name: &str, args: &Value) -> Option<String> {
             && !type_matches(expected, value)
         {
             return Some(format!(
-                "argument `{key}` must be {expected}, got {}. A wrong-typed value is read as \
-                 absent, so its filter would never have been applied.",
+                "argument `{key}` must be {}, got {} ({value}). A value the handler cannot read \
+                 is read as absent, so its filter would never have been applied.",
+                type_expectation(expected),
                 type_name(value)
             ));
         }
@@ -369,6 +388,42 @@ mod tests {
                 t["name"]
             );
         }
+    }
+
+    /// The validator reads integer arguments with `as_u64`, so it rejects
+    /// negatives. A client validating against `tools/list` must reach the same
+    /// verdict — the schema has to carry the bound, not just the code.
+    #[test]
+    fn every_integer_argument_advertises_its_lower_bound() {
+        let resp = list(Some(json!(1)));
+        for t in resp["result"]["tools"].as_array().unwrap() {
+            let Some(props) = t["inputSchema"]["properties"].as_object() else {
+                continue;
+            };
+            for (key, spec) in props {
+                if spec["type"] == json!("integer") {
+                    assert_eq!(
+                        spec["minimum"],
+                        json!(0),
+                        "{}.{key} is an integer argument without minimum: 0",
+                        t["name"]
+                    );
+                }
+            }
+        }
+    }
+
+    /// `status` accepts exactly three values; advertising it as a bare string
+    /// left callers guessing and kept the check out of the shared validator.
+    #[test]
+    fn query_traces_status_advertises_its_values() {
+        let resp = list(Some(json!(1)));
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let traces = tools.iter().find(|t| t["name"] == "query_traces").unwrap();
+        assert_eq!(
+            traces["inputSchema"]["properties"]["status"]["enum"],
+            json!(["error", "ok", "unset"])
+        );
     }
 
     #[test]
