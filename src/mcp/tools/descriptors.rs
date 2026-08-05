@@ -31,6 +31,7 @@ fn descriptors() -> Vec<Value> {
                     "scope": { "type": "string", "enum": ["all", "service"] },
                     "service": { "type": "string" }
                 },
+                "additionalProperties": false,
                 "required": ["scope"]
             },
             "outputSchema": {
@@ -48,7 +49,7 @@ fn descriptors() -> Vec<Value> {
             "name": "mark_checkpoint",
             "title": "Mark Checkpoint",
             "description": "Return an opaque monotonic checkpoint token for 'now'. Pass it later as `since` to scope a summary to telemetry ingested after this point. Not a wall-clock time.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "outputSchema": {
                 "type": "object",
                 "properties": { "checkpoint": { "type": "integer" } },
@@ -67,6 +68,7 @@ fn descriptors() -> Vec<Value> {
                     "since": { "type": "integer" },
                     "detail": { "type": "string", "enum": ["concise", "detailed"] }
                 },
+                "additionalProperties": false,
                 "required": ["service"]
             },
             "outputSchema": {
@@ -90,7 +92,7 @@ fn descriptors() -> Vec<Value> {
             "name": "check_health",
             "title": "Check Global Health",
             "description": "Rank every known service by health, worst first. Use when you don't yet know which service is in trouble.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "outputSchema": {
                 "type": "object",
                 "properties": { "services": { "type": "array", "items": { "type": "object" } } },
@@ -108,7 +110,8 @@ fn descriptors() -> Vec<Value> {
                     "service": { "type": "string" }, "level": { "type": "string" },
                     "contains": { "type": "string" },
                     "limit": { "type": "integer" }, "logql": { "type": "string" }
-                }
+                },
+                "additionalProperties": false
             },
             "outputSchema": {
                 "type": "object",
@@ -133,7 +136,8 @@ fn descriptors() -> Vec<Value> {
                     "status": { "type": "string" }, "min_duration": { "type": "string" },
                     "limit": { "type": "integer" },
                     "traceql": { "type": "string" }
-                }
+                },
+                "additionalProperties": false
             },
             "outputSchema": {
                 "type": "object",
@@ -157,6 +161,7 @@ fn descriptors() -> Vec<Value> {
                     "promql": { "type": "string" },
                     "start": { "type": "string" }, "end": { "type": "string" }, "step": { "type": "string" }
                 },
+                "additionalProperties": false,
                 "required": ["promql"]
             },
             "outputSchema": {
@@ -178,6 +183,7 @@ fn descriptors() -> Vec<Value> {
                     "trace_id": { "type": "string" },
                     "detail": { "type": "string", "enum": ["concise", "detailed"] }
                 },
+                "additionalProperties": false,
                 "required": ["trace_id"]
             },
             "outputSchema": {
@@ -194,7 +200,7 @@ fn descriptors() -> Vec<Value> {
             "name": "list_services",
             "title": "List Services",
             "description": "List every service reporting telemetry and which signals (logs/metrics/traces) each has.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "outputSchema": {
                 "type": "object",
                 "properties": { "services": { "type": "array", "items": { "type": "object" } } },
@@ -209,6 +215,7 @@ fn descriptors() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": { "service": { "type": "string" } },
+                "additionalProperties": false,
                 "required": ["service"]
             },
             "outputSchema": {
@@ -230,29 +237,89 @@ pub fn list(id: Option<Value>) -> Value {
     protocol::success(id, json!({ "tools": descriptors() }))
 }
 
-/// The argument keys a tool declares in its `inputSchema.properties`, sorted.
-/// `None` if no tool by that name exists.
-fn declared_args(name: &str) -> Option<Vec<String>> {
-    let tools = descriptors();
-    let tool = tools.iter().find(|t| t["name"] == name)?;
-    let props = tool["inputSchema"]["properties"].as_object()?;
-    let mut keys: Vec<String> = props.keys().cloned().collect();
-    keys.sort();
-    Some(keys)
+/// Does `value` satisfy a JSON Schema `type` keyword? Unknown type names and
+/// type unions (which no `inputSchema` uses) are not constrained.
+///
+/// `integer` additionally requires non-negative: every integer argument in this
+/// API is a count or a checkpoint token, and handlers read them with `as_u64`,
+/// so `-5` would parse as absent.
+fn type_matches(expected: &str, value: &Value) -> bool {
+    match expected {
+        "string" => value.is_string(),
+        "integer" => value.is_u64(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        _ => true,
+    }
 }
 
-/// First argument key the named tool does not declare, paired with the keys it
-/// does accept. Handlers read only their declared keys, so anything else would
-/// be dropped silently and the result would look filtered when it wasn't —
-/// callers must be told instead.
-pub(super) fn unknown_argument(name: &str, args: &Value) -> Option<(String, Vec<String>)> {
-    let declared = declared_args(name)?;
-    let unknown = args
-        .as_object()?
-        .keys()
-        .find(|key| !declared.contains(key))?
-        .clone();
-    Some((unknown, declared))
+/// The JSON Schema type name for a value, for error messages.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Why the named tool cannot accept these arguments, phrased for the caller, or
+/// `None` if every key is declared and every value fits its declared schema.
+///
+/// Handlers read their arguments with `as_str`/`as_u64` and treat anything else
+/// as absent, so an undeclared key, a wrong-typed value, or an out-of-enum value
+/// would all be dropped in silence — and a dropped filter is invisible in the
+/// result, which still reports a count that reads like a match. Validating here
+/// against the tool's own advertised schema keeps one source of truth.
+///
+/// `args` must be an object; a non-object is a malformed request, rejected by
+/// the caller before this point.
+pub(super) fn argument_problem(name: &str, args: &Value) -> Option<String> {
+    let tools = descriptors();
+    let schema = &tools.iter().find(|t| t["name"] == name)?["inputSchema"];
+    let props = schema.get("properties")?.as_object()?;
+    let given = args.as_object()?;
+
+    for (key, value) in given {
+        let Some(spec) = props.get(key) else {
+            let accepts = if props.is_empty() {
+                format!("{name} takes no arguments")
+            } else {
+                let mut declared: Vec<&str> = props.keys().map(String::as_str).collect();
+                declared.sort_unstable();
+                format!("{name} accepts: {}", declared.join(", "))
+            };
+            return Some(format!(
+                "unknown argument `{key}` — {accepts}. Undeclared keys are not filters: they are \
+                 never applied, so the result would have looked filtered when it was not. For \
+                 span/resource attributes use a raw query string."
+            ));
+        };
+        if let Some(expected) = spec.get("type").and_then(|t| t.as_str())
+            && !type_matches(expected, value)
+        {
+            return Some(format!(
+                "argument `{key}` must be {expected}, got {}. A wrong-typed value is read as \
+                 absent, so its filter would never have been applied.",
+                type_name(value)
+            ));
+        }
+        if let Some(allowed) = spec.get("enum").and_then(|e| e.as_array())
+            && !allowed.contains(value)
+        {
+            let valid: Vec<String> = allowed.iter().map(|v| v.to_string()).collect();
+            return Some(format!(
+                "invalid `{key}`: {value}. Valid values: {}",
+                valid.join(", ")
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -286,6 +353,22 @@ mod tests {
         let logs = tools.iter().find(|t| t["name"] == "query_logs").unwrap();
         assert_eq!(logs["annotations"]["readOnlyHint"], json!(true));
         assert_eq!(logs["annotations"]["openWorldHint"], json!(false));
+    }
+
+    /// The dispatcher treats `properties` as an exhaustive allowlist, so the
+    /// advertised schema must say so too — otherwise a client validating against
+    /// `tools/list` considers a key valid that the server rejects.
+    #[test]
+    fn every_input_schema_is_closed() {
+        let resp = list(Some(json!(1)));
+        for t in resp["result"]["tools"].as_array().unwrap() {
+            assert_eq!(
+                t["inputSchema"]["additionalProperties"],
+                json!(false),
+                "{} inputSchema must set additionalProperties: false",
+                t["name"]
+            );
+        }
     }
 
     #[test]

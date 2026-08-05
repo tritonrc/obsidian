@@ -38,24 +38,23 @@ pub fn call(state: &SharedState, id: Option<Value>, params: &Value) -> Value {
         Some(n) => n,
         None => return protocol::error(id, protocol::INVALID_PARAMS, "missing tool name"),
     };
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    if let Some((unknown, accepted)) = descriptors::unknown_argument(name, &args) {
-        let accepts = if accepted.is_empty() {
-            format!("{name} takes no arguments")
-        } else {
-            format!("{name} accepts: {}", accepted.join(", "))
-        };
-        return tool_err(
-            id,
-            format!(
-                "unknown argument `{unknown}` — {accepts}. Undeclared keys are not filters: \
-                 they are never applied, so the result would have looked filtered when it \
-                 was not. For span/resource attributes use a raw query string."
-            ),
-        );
+    // `arguments` is an object per the request schema. Absent and `null` both
+    // mean "no arguments" (clients send either); any other shape is malformed
+    // request structure, which is a protocol error, not a tool input the model
+    // can correct.
+    let args = match params.get("arguments") {
+        None | Some(Value::Null) => json!({}),
+        Some(v) if v.is_object() => v.clone(),
+        Some(_) => {
+            return protocol::error(
+                id,
+                protocol::INVALID_PARAMS,
+                "`arguments` must be an object",
+            );
+        }
+    };
+    if let Some(problem) = descriptors::argument_problem(name, &args) {
+        return tool_err(id, problem);
     }
     match name {
         "reset" => handle_reset(state, id, &args),
@@ -106,6 +105,99 @@ mod tests {
             resp["result"]["structuredContent"].is_null(),
             "a rejected call must not return counts"
         );
+    }
+
+    /// Same trap as an undeclared key: handlers read `as_str()`/`as_u64()`, so a
+    /// wrong-typed value reads as absent and its filter is never applied.
+    #[test]
+    fn call_wrong_typed_argument_is_tool_error() {
+        let st = tests_state();
+        let resp = call(
+            &st,
+            Some(json!(1)),
+            &json!({
+                "name": "query_traces",
+                "arguments": { "service": 123, "status": "error" }
+            }),
+        );
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("service"),
+            "message must name the key: {text}"
+        );
+        assert!(
+            text.contains("string"),
+            "message must name the type: {text}"
+        );
+    }
+
+    /// A checkpoint token is a non-negative counter; `-5` failed `as_u64()` and
+    /// silently widened the summary to all time.
+    #[test]
+    fn call_negative_integer_argument_is_tool_error() {
+        let st = tests_state();
+        let resp = call(
+            &st,
+            Some(json!(1)),
+            &json!({ "name": "summarize_activity", "arguments": { "service": "api", "since": -5 } }),
+        );
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("since"), "message must name the key: {text}");
+    }
+
+    /// `detail` is compared against "detailed", so any other string silently
+    /// degraded to concise output instead of being questioned.
+    #[test]
+    fn call_out_of_enum_argument_is_tool_error() {
+        let st = tests_state();
+        let resp = call(
+            &st,
+            Some(json!(1)),
+            &json!({
+                "name": "get_trace",
+                "arguments": { "trace_id": "0".repeat(32), "detail": "verbose" }
+            }),
+        );
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("detail"), "message must name the key: {text}");
+        assert!(
+            text.contains("detailed"),
+            "message must list valid values: {text}"
+        );
+    }
+
+    /// `CallToolRequest.arguments` is an object; a list or scalar is a malformed
+    /// request, not a self-correctable tool input.
+    #[test]
+    fn call_non_object_arguments_is_invalid_params() {
+        let st = tests_state();
+        for bad in [json!([]), json!("service=api"), json!(7)] {
+            let resp = call(
+                &st,
+                Some(json!(1)),
+                &json!({ "name": "check_health", "arguments": bad }),
+            );
+            assert_eq!(
+                resp["error"]["code"],
+                json!(crate::mcp::protocol::INVALID_PARAMS)
+            );
+        }
+    }
+
+    /// Lenient by choice: clients that send `null` for "no arguments" are common
+    /// and unambiguous, so it is treated as `{}` rather than rejected.
+    #[test]
+    fn call_null_arguments_is_treated_as_empty() {
+        let st = tests_state();
+        let resp = call(
+            &st,
+            Some(json!(1)),
+            &json!({ "name": "check_health", "arguments": null }),
+        );
+        assert_eq!(resp["result"]["isError"], json!(false));
     }
 
     #[test]
