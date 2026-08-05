@@ -1,0 +1,211 @@
+name: Docker
+
+# Publishes ghcr.io/tritonrc/aniani:
+#   v0.13.3 tag  -> :0.13.3, :0.13, :latest
+#   master push  -> :edge
+#
+# Each architecture is compiled on a native runner (no QEMU) and the
+# COPY-only Dockerfile assembles both into one multi-arch manifest.
+# Pull requests build and smoke-test both architectures but publish nothing.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binary:
+    name: Static binary (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: amd64
+            target: x86_64-unknown-linux-musl
+          # Native arm64 runner — free for public repositories, and far faster
+          # than cross-compiling or emulating the build.
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Supplies musl-gcc for the runner's own architecture, which is all a
+      # native musl build needs to link.
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # The image is FROM scratch, so a dynamically linked binary would build
+      # fine and then fail to exec at runtime. Catch that here instead.
+      - name: Verify the binary is statically linked
+        run: |
+          bin=target/${{ matrix.target }}/release/aniani
+          file "$bin"
+          if ! ldd "$bin" 2>&1 | grep -q 'not a dynamic executable\|statically linked'; then
+            echo "::error::$bin is dynamically linked; it cannot run in a scratch image" >&2
+            ldd "$bin" || true
+            exit 1
+          fi
+
+      # Both runners are native, so each architecture's binary can actually be
+      # executed here — the arm64 build is never run anywhere else.
+      - name: Verify the binary runs
+        run: |
+          bin=target/${{ matrix.target }}/release/aniani
+          "$bin" --version
+          "$bin" --port 44320 &
+          pid=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:44320/ready >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:44320/ready
+          kill "$pid"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aniani-musl-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/aniani
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Build and push image
+    needs: binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: aniani-musl-*
+          path: downloaded
+
+      - name: Arrange build context
+        run: |
+          for arch in amd64 arm64; do
+            mkdir -p "dist/$arch"
+            cp "downloaded/aniani-musl-$arch/aniani" "dist/$arch/aniani"
+            chmod +x "dist/$arch/aniani"
+          done
+          ls -l dist/*/aniani
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests, which push nothing (and whose token would be
+      # read-only if the PR came from a fork).
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=edge,branch=master
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # Never pushed — only gives the PR build a name to build under.
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=aniani
+            org.opencontainers.image.description=Agent-first, lightweight observability engine — OTLP in, LogQL/PromQL/TraceQL out
+            org.opencontainers.image.licenses=MIT
+
+      # Smoke test the amd64 image BEFORE publishing anything: a pushed image is
+      # public immediately, so a broken one should never reach the registry.
+      # This layer is cached, so the push below reuses it.
+      - name: Build amd64 image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: aniani:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke -p 4320:4320 aniani:smoke
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4320/ready >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4320/ready
+          curl -fsS http://127.0.0.1:4320/api/v1/status | head -c 400; echo
+          # Snapshots must be writable as the nonroot uid inside /data.
+          curl -fsS -X POST http://127.0.0.1:4320/api/v1/snapshot
+          docker logs smoke
+          docker rm -f smoke
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            heading="### Built (not pushed)"
+          else
+            heading="### Pushed"
+          fi
+          {
+            echo "$heading"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
