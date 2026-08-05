@@ -1,18 +1,16 @@
 use serde_json::Value;
 
 use crate::mcp::synth;
+use crate::mcp::tools::args::{Detail, GetTraceArgs};
 use crate::mcp::tools::dispatch::{tool_err, tool_ok};
 use crate::store::SharedState;
 
 pub(in crate::mcp::tools) fn handle_get_trace(
     state: &SharedState,
     id: Option<Value>,
-    args: &Value,
+    args: &GetTraceArgs,
 ) -> Value {
-    let hex = match args.get("trace_id").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return tool_err(id, "`trace_id` is required (32 hex chars)".into()),
-    };
+    let hex = args.trace_id.as_str();
     if hex.len() != 32 {
         return tool_err(id, "trace_id must be exactly 32 hex characters".into());
     }
@@ -24,7 +22,7 @@ pub(in crate::mcp::tools) fn handle_get_trace(
             Err(_) => return tool_err(id, "trace_id is not valid hex".into()),
         }
     }
-    let detailed = args.get("detail").and_then(|v| v.as_str()) == Some("detailed");
+    let detailed = args.detail.is_some_and(Detail::wants_extras);
     match synth::build_trace_tree(state, &bytes, detailed) {
         Some(tree) => {
             let text = format!(

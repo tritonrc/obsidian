@@ -80,8 +80,11 @@ src/
 │   ├── server.rs        # POST /mcp dispatch + transport compliance (202/batch/origin/version)
 │   ├── tools/           # tool descriptors, tools/list, tools/call dispatch, the 10 handlers, instructions
 │   │   ├── mod.rs       # public tools surface: INSTRUCTIONS, list, call
-│   │   ├── descriptors.rs
-│   │   ├── dispatch.rs
+│   │   ├── args/        # one typed struct per tool — the source of both inputSchema and deserialization
+│   │   │   ├── mod.rs   # the 10 tool_args! declarations; add a tool's arguments here
+│   │   │   └── schema.rs # tool_args!/str_enum! macros, schema generation, argument validation
+│   │   ├── registry.rs  # the tool table: name → args type → handler → advertised metadata, once each
+│   │   ├── dispatch.rs  # tools/call request shape + typed arg parsing, then hands off to the table
 │   │   └── handlers/
 │   └── synth/           # transport-free typed cores (summarize_activity, check_health, describe_service, trace tree)
 │       ├── mod.rs       # public synth surface
@@ -101,6 +104,29 @@ src/
     ├── status.rs        # GET /api/v1/status
     └── summary.rs       # GET /api/v1/summary — unified error summary across signals
 ```
+
+### MCP Tool Arguments
+
+Never read a tool argument out of a `&Value` in a handler. Declare it in `src/mcp/tools/args/mod.rs` and let the handler take the typed struct:
+
+```rust
+tool_args! {
+    struct QueryTracesArgs for "query_traces" {
+        service: Option<String>,   // Option<T> → optional
+        status: Option<TraceStatus>, // str_enum! type → advertises its own values
+        limit: Option<u64>,        // u64 → advertises minimum/maximum
+        traceql: Option<String>,
+    }
+}
+```
+
+Then add one entry to the table in `registry.rs`, which is the only place a tool name appears:
+
+```rust
+"query_traces"(QueryTracesArgs) => handle_query_traces { "title": ..., "description": ..., ... },
+```
+
+The entry that advertises the schema is the entry that dispatches, so a tool cannot advertise a contract it does not honor — mismatching them is a type error. Three consequences to expect: a field no handler touches is a `field is never read` build failure (intentional — an argument accepted and ignored is invisible to the caller, though the lint cannot tell reading from applying, so deliberate non-use like `query_logs`' raw-`logql` branch is fine); a closed value set belongs in a `str_enum!` matched exhaustively, not a string comparison that falls through to a default; and only `String`, `u64`, `str_enum!` types, and `Option` of those are supported field types — anything else needs a deliberate `ArgType` impl. Keep semantic validation — duration parsing, hex length, "does this service exist" — in the handler.
 
 ### Naming
 
